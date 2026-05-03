@@ -11,32 +11,31 @@ def calculate_risk(df):
         df["risk_level"] = []
         return df
 
-    capacity_safe = df["capacity"].replace(0, 1)
-    occupancy_safe = df["occupancy"].replace(0, 1)
+    if "risk_eligible" not in df.columns:
+        df["risk_eligible"] = True
 
-    df["occupancy_rate"] = (df["occupancy"] / capacity_safe * 100).round(1)
+    capacity_safe = df["capacity"].replace(0, pd.NA)
+    occupancy_safe = df["occupancy"].replace(0, pd.NA)
+
+    df["occupancy_rate"] = (
+        df["occupancy"] / capacity_safe * 100
+    ).round(1)
 
     df["animals_per_vet"] = (
         df["occupancy"] / df["vet_count"].replace(0, 1)
     ).round(1)
 
-    # 1. Kapasite baskısı
-    # %150 ve üzeri doluluk maksimum baskı olarak değerlendirilir.
     capacity_pressure = (
         (df["occupancy"] / capacity_safe).clip(0, 1.5) / 1.5 * 100
     )
 
-    # 2. Veteriner iş yükü
-    # Veteriner başına 150 hayvan ve üzeri yüksek baskı kabul edilir.
     vet_load = df["occupancy"] / (df["vet_count"] + 1)
     vet_pressure = (vet_load / 150).clip(0, 1) * 100
 
-    # 3. Sahiplendirme açığı
     adoption_gap = (
         1 - (df["adoption_count"] / occupancy_safe)
     ).clip(0, 1) * 100
 
-    # 4. Kısırlaştırma açığı
     sterilization_gap = (
         1 - (df["sterilization_count"] / occupancy_safe)
     ).clip(0, 1) * 100
@@ -49,15 +48,25 @@ def calculate_risk(df):
     df["risk_score"] = (
         capacity_pressure * 0.50
         + vet_pressure * 0.25
-        + adoption_gap * 0.15
-        + sterilization_gap * 0.10
+        + adoption_gap.fillna(100) * 0.15
+        + sterilization_gap.fillna(100) * 0.10
     ).clip(0, 100).round(1)
+
+    # Risk için yeterli veri yoksa risk üretme
+    not_ready = ~df["risk_eligible"].astype(bool)
+
+    df.loc[not_ready, "risk_score"] = pd.NA
+    df.loc[not_ready, "occupancy_rate"] = pd.NA
+    df.loc[not_ready, "animals_per_vet"] = pd.NA
 
     df["risk_level"] = pd.cut(
         df["risk_score"],
         bins=[-1, 40, 70, 100],
         labels=["Düşük", "Orta", "Kritik"],
     )
+
+    df["risk_level"] = df["risk_level"].astype("object")
+    df.loc[not_ready, "risk_level"] = "Veri Yetersiz"
 
     return df
 
@@ -74,20 +83,34 @@ def create_action_recommendations(df):
     for _, row in df.iterrows():
         actions = []
 
-        if row["occupancy_rate"] >= 100:
+        if not bool(row.get("risk_eligible", True)):
+            if row.get("data_scope") == "capacity_only":
+                actions.append("mevcut hayvan sayısı belediyeden doğrulanmalı")
+                actions.append("kapasite envanteri risk analizi için doluluk verisiyle tamamlanmalı")
+            elif row.get("data_scope") == "location_only":
+                actions.append("kapasite ve mevcut hayvan bilgisi eklenmeli")
+            else:
+                actions.append("kaynak veri ana risk analizi için uygun değil")
+            recommendations.append(", ".join(actions).capitalize() + ".")
+            continue
+
+        occupancy_rate = row.get("occupancy_rate", 0)
+        animals_per_vet = row.get("animals_per_vet", 0)
+
+        if occupancy_rate >= 100:
             actions.append("kapasite artırımı veya sevk planlaması")
-        elif row["occupancy_rate"] >= 85:
+        elif occupancy_rate >= 85:
             actions.append("kapasite yakından izlenmeli")
 
-        if row["animals_per_vet"] >= 150:
+        if animals_per_vet >= 150:
             actions.append("veteriner/personel desteği")
-        elif row["animals_per_vet"] >= 100:
+        elif animals_per_vet >= 100:
             actions.append("veteriner iş yükü izlenmeli")
 
-        if row["adoption_count"] < row["occupancy"] * 0.15:
+        if row.get("adoption_count", 0) < row.get("occupancy", 0) * 0.15:
             actions.append("sahiplendirme kampanyası")
 
-        if row["sterilization_count"] < row["occupancy"] * 0.25:
+        if row.get("sterilization_count", 0) < row.get("occupancy", 0) * 0.25:
             actions.append("kısırlaştırma operasyonu")
 
         if not row.get("coordinate_valid", True):
