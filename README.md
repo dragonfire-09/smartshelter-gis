@@ -1,33 +1,28 @@
 # SmartShelter GIS
 
-## Amaç
-Hayvan bakımevleri ve toplama merkezleri için açık veri tabanlı GIS karar destek prototipi.
+SmartShelter GIS, hayvan bakımevleri ve sokak hayvanları yönetimi için açık veri tabanlı GIS karar destek prototipidir.
 
 ## Özellikler
-- Canlı CKAN API veri denemesi
-- Stabil demo CSV fallback
-- Harita tabanlı merkez görüntüleme
-- Kapasite/doluluk analizi
-- Risk skoru
-- İlçe ve risk filtreleme
-- Veri kalite notları
+
+- Stabil demo CSV veri modu
+- Canlı CKAN API veri çekme
+- Türkiye geneli CKAN resource taraması
+- CSV, XLSX, XLS, JSON, ODS kaynak okuma
+- MarkerCluster destekli GIS harita
+- Risk yoğunluk haritası
+- Kapasite, doluluk, veteriner yükü ve risk skoru analizi
+- Günlük snapshot ile geçmiş veri takibi
+- Tarihsel karşılaştırma
+- AI benzeri kural tabanlı analiz modülü
+- Yönetici özeti
+- Risk açıklaması
+- Veri kalite skoru
+- Anomali tespiti
+- Senaryo simülasyonu
 - CSV/Excel rapor indirme
 
-## Risk Skoru Metodolojisi
-Bu skor resmi denetim skoru değildir. Demo amaçlı karar destek göstergesidir.
+## Kurulum
 
-## Veri Kaynakları
-- Demo CSV
-- Belediye açık veri portalları
-- CKAN uyumlu API kaynakları
-
-## Çalıştırma
+```bash
 pip install -r requirements.txt
 streamlit run app.py
-
-## Yol Haritası
-- PostGIS entegrasyonu
-- İl/ilçe sınır katmanları
-- Ulusal veri standardı
-- Mobil saha veri girişi
-- Bakanlık API entegrasyonu
