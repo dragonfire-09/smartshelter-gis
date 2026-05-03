@@ -23,6 +23,9 @@ def empty_figure(title="Veri bulunamadı"):
 
 
 def chart_risk_score(df):
+    if "risk_score" in df.columns:
+        df = df[df["risk_score"].notna()].copy()
+
     if df.empty:
         return empty_figure("Risk Skoru")
 
@@ -39,14 +42,19 @@ def chart_risk_score(df):
             "Düşük": "#16a34a",
             "Orta": "#f59e0b",
             "Kritik": "#dc2626",
+            "Veri Yetersiz": "#6b7280",
         },
         hover_data=[
-            "city",
-            "district",
-            "capacity",
-            "occupancy",
-            "occupancy_rate",
-            "animals_per_vet",
+            c for c in [
+                "city",
+                "district",
+                "capacity",
+                "occupancy",
+                "occupancy_rate",
+                "animals_per_vet",
+                "source_portal",
+            ]
+            if c in plot_df.columns
         ],
     )
 
@@ -63,6 +71,9 @@ def chart_risk_score(df):
 
 
 def chart_occupancy_rate(df):
+    if "occupancy_rate" in df.columns:
+        df = df[df["occupancy_rate"].notna()].copy()
+
     if df.empty:
         return empty_figure("Doluluk Oranı")
 
@@ -76,12 +87,16 @@ def chart_occupancy_rate(df):
         text="occupancy_rate",
         title="Doluluk Oranı (%)",
         hover_data=[
-            "city",
-            "district",
-            "capacity",
-            "occupancy",
-            "risk_level",
-            "risk_score",
+            c for c in [
+                "city",
+                "district",
+                "capacity",
+                "occupancy",
+                "risk_level",
+                "risk_score",
+                "source_portal",
+            ]
+            if c in plot_df.columns
         ],
     )
 
@@ -103,8 +118,10 @@ def build_district_summary(df):
             columns=[
                 "district",
                 "center_count",
-                "total_capacity",
-                "total_occupancy",
+                "risk_ready_count",
+                "capacity_record_count",
+                "known_capacity",
+                "known_occupancy",
                 "occupancy_rate",
                 "avg_risk",
                 "critical_count",
@@ -112,12 +129,37 @@ def build_district_summary(df):
             ]
         )
 
+    work_df = df.copy()
+
+    if "capacity_available" not in work_df.columns:
+        work_df["capacity_available"] = True
+
+    if "occupancy_available" not in work_df.columns:
+        work_df["occupancy_available"] = True
+
+    if "risk_eligible" not in work_df.columns:
+        work_df["risk_eligible"] = True
+
     summary = (
-        df.groupby("district", as_index=False)
+        work_df.groupby("district", as_index=False)
         .agg(
             center_count=("name", "count"),
-            total_capacity=("capacity", "sum"),
-            total_occupancy=("occupancy", "sum"),
+            risk_ready_count=(
+                "risk_eligible",
+                lambda s: s.astype(bool).sum(),
+            ),
+            capacity_record_count=(
+                "capacity_available",
+                lambda s: s.astype(bool).sum(),
+            ),
+            known_capacity=(
+                "capacity",
+                lambda s: s[work_df.loc[s.index, "capacity_available"].astype(bool)].sum(),
+            ),
+            known_occupancy=(
+                "occupancy",
+                lambda s: s[work_df.loc[s.index, "occupancy_available"].astype(bool)].sum(),
+            ),
             avg_risk=("risk_score", "mean"),
             critical_count=(
                 "risk_level",
@@ -125,20 +167,24 @@ def build_district_summary(df):
             ),
             estimated_record_count=(
                 "is_estimated",
-                lambda s: (s == True).sum(),  # noqa: E712
+                lambda s: s.astype(bool).sum() if len(s) else 0,
             ),
         )
     )
 
     summary["occupancy_rate"] = (
-        summary["total_occupancy"]
-        / summary["total_capacity"].replace(0, 1)
+        summary["known_occupancy"]
+        / summary["known_capacity"].replace(0, pd.NA)
         * 100
     ).round(1)
 
     summary["avg_risk"] = summary["avg_risk"].round(1)
 
-    summary = summary.sort_values("avg_risk", ascending=False)
+    summary = summary.sort_values(
+        ["avg_risk", "known_capacity"],
+        ascending=[False, False],
+        na_position="last",
+    )
 
     return summary
 
@@ -147,8 +193,16 @@ def chart_district_avg_risk(summary_df):
     if summary_df.empty:
         return empty_figure("İlçe Bazlı Ortalama Risk")
 
+    plot_df = summary_df.copy()
+
+    if "avg_risk" in plot_df.columns:
+        plot_df = plot_df[plot_df["avg_risk"].notna()].copy()
+
+    if plot_df.empty:
+        return empty_figure("İlçe Bazlı Ortalama Risk")
+
     fig = px.bar(
-        summary_df,
+        plot_df,
         x="district",
         y="avg_risk",
         color="avg_risk",
@@ -156,11 +210,15 @@ def chart_district_avg_risk(summary_df):
         title="İlçe Bazlı Ortalama Risk",
         color_continuous_scale="RdYlGn_r",
         hover_data=[
-            "center_count",
-            "total_capacity",
-            "total_occupancy",
-            "occupancy_rate",
-            "critical_count",
+            c for c in [
+                "center_count",
+                "risk_ready_count",
+                "known_capacity",
+                "known_occupancy",
+                "occupancy_rate",
+                "critical_count",
+            ]
+            if c in plot_df.columns
         ],
     )
 
@@ -179,15 +237,23 @@ def chart_history_trend(summary_df):
     if summary_df.empty:
         return empty_figure("Tarihsel Trend")
 
-    long_df = summary_df.melt(
-        id_vars=["snapshot_date"],
-        value_vars=[
+    value_vars = [
+        c for c in [
             "record_count",
             "total_capacity",
             "total_occupancy",
             "avg_risk",
             "critical_count",
-        ],
+        ]
+        if c in summary_df.columns
+    ]
+
+    if not value_vars:
+        return empty_figure("Tarihsel Trend")
+
+    long_df = summary_df.melt(
+        id_vars=["snapshot_date"],
+        value_vars=value_vars,
         var_name="metric",
         value_name="value",
     )
@@ -274,13 +340,16 @@ def chart_record_delta(compare_df, metric_delta="risk_score_delta"):
         text=metric_delta,
         title=title_map.get(metric_delta, metric_delta),
         hover_data=[
-            "city",
-            "district",
-            "change_status",
-            "risk_score_old",
-            "risk_score_new",
-            "occupancy_old",
-            "occupancy_new",
+            c for c in [
+                "city",
+                "district",
+                "change_status",
+                "risk_score_old",
+                "risk_score_new",
+                "occupancy_old",
+                "occupancy_new",
+            ]
+            if c in plot_df.columns
         ],
     )
 
