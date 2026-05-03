@@ -16,9 +16,12 @@ from src.charts import (
 from src.data_loader import (
     CKAN_SOURCES,
     LOCAL_FILE,
+    TURKIYE_CKAN_SOURCES,
     load_local_data,
+    load_multiple_resources,
     load_resource,
     search_ckan_resources,
+    search_turkiye_ckan_resources,
 )
 from src.history import (
     append_snapshot,
@@ -121,9 +124,11 @@ def render_methodology_note():
     st.info(
         """
         Bu uygulama resmi bir denetim sistemi değildir. Açık veri ve demo veriyle çalışan
-        prototip bir karar destek ekranıdır. Risk skoru; kapasite baskısı, veteriner yükü,
-        sahiplendirme açığı ve kısırlaştırma performansı gibi göstergelerden hesaplanan
-        örnek bir önceliklendirme skorudur.
+        prototip bir karar destek ekranıdır.
+
+        Risk skoru; kapasite baskısı, veteriner yükü, sahiplendirme açığı ve
+        kısırlaştırma performansı gibi göstergelerden hesaplanan örnek bir
+        önceliklendirme skorudur.
 
         Geçmiş analitik modülü, uygulamanın çektiği verileri günlük snapshot olarak saklar.
         Kaynak sistem eski tarihli resource yayınlıyorsa derin CKAN taramasıyla listelenebilir.
@@ -177,7 +182,7 @@ def render_data_quality_summary(df: pd.DataFrame):
 
     if estimated > 0:
         st.warning(
-            "Bazı kayıtlarda eksik alanlar demo/prototip amacıyla tahmini değerlerle tamamlanmıştır."
+            "Bazı kayıtlarda eksik operasyonel alanlar demo/prototip amacıyla tahmini değerlerle tamamlanmıştır."
         )
     else:
         st.success("Tahmini değer kullanılan kayıt bulunmuyor.")
@@ -202,6 +207,10 @@ def render_record_detail(df: pd.DataFrame):
 
     st.write(f"**İl:** {item['city']}")
     st.write(f"**İlçe:** {item['district']}")
+
+    if item.get("source_portal", ""):
+        st.write(f"**Kaynak Portal:** {item.get('source_portal', '')}")
+
     st.write(f"**Kapasite:** {int(item['capacity'])}")
     st.write(f"**Mevcut Hayvan:** {int(item['occupancy'])}")
     st.write(f"**Doluluk Oranı:** %{item['occupancy_rate']}")
@@ -223,9 +232,11 @@ def render_record_detail(df: pd.DataFrame):
     st.markdown("#### Önerilen Aksiyon")
     st.write(item["recommended_action"])
 
-    if item.get("is_estimated", False):
+    quality_note = str(item.get("data_quality_note", "")).strip()
+
+    if quality_note:
         st.markdown("#### Veri Kalitesi Notu")
-        st.warning(item.get("data_quality_note", "Bazı alanlar tahmini olabilir."))
+        st.warning(quality_note)
 
 
 def render_report_downloads(
@@ -486,6 +497,7 @@ mode = st.sidebar.radio(
     [
         "Stabil Demo CSV",
         "Canlı CKAN API Dene",
+        "Türkiye Geneli CKAN Taraması",
     ],
 )
 
@@ -493,17 +505,26 @@ raw_df = pd.DataFrame()
 selected_source_name = "Stabil Demo CSV"
 selected_resource_label = "Lokal CSV"
 deep_scan = False
+loaded_resources_info = pd.DataFrame()
+failed_resource_count = 0
 
+
+# ---------------------------------------------------------
+# Data Loading Modes
+# ---------------------------------------------------------
 if mode == "Stabil Demo CSV":
     try:
         raw_df = load_local_data(LOCAL_FILE)
+        selected_source_name = "Stabil Demo CSV"
+        selected_resource_label = "Lokal CSV"
         st.success("Stabil demo CSV verisi kullanılıyor.")
     except Exception as e:
         st.error("Lokal CSV dosyası okunamadı.")
         st.exception(e)
         st.stop()
 
-else:
+
+elif mode == "Canlı CKAN API Dene":
     selected_source_name = st.sidebar.selectbox(
         "Canlı kaynak seç",
         list(CKAN_SOURCES.keys()),
@@ -535,6 +556,7 @@ else:
             raw_df = load_local_data(LOCAL_FILE)
             selected_source_name = "Fallback Demo CSV"
             selected_resource_label = "Lokal CSV"
+
         else:
             resource_labels = [
                 (
@@ -554,20 +576,24 @@ else:
                 resource_labels.index(selected_resource_label)
             ]
 
+            selected_resource["source_portal"] = selected_source_name
+
             df_resources = pd.DataFrame(resources)
 
             with st.sidebar.expander("Bulunan Resource Detayları"):
+                display_cols = [
+                    "package",
+                    "name",
+                    "format",
+                    "matched_query",
+                    "package_modified",
+                    "resource_last_modified",
+                ]
+
+                existing_cols = [c for c in display_cols if c in df_resources.columns]
+
                 st.dataframe(
-                    df_resources[
-                        [
-                            "package",
-                            "name",
-                            "format",
-                            "matched_query",
-                            "package_modified",
-                            "resource_last_modified",
-                        ]
-                    ],
+                    df_resources[existing_cols],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -581,7 +607,12 @@ else:
                 raw_df = load_local_data(LOCAL_FILE)
                 selected_source_name = "Fallback Demo CSV"
                 selected_resource_label = "Lokal CSV"
+
             else:
+                raw_df["source_portal"] = selected_source_name
+                raw_df["source_resource"] = selected_resource_label
+                raw_df["source_url"] = selected_resource.get("url", "")
+
                 st.success(f"Canlı veri kaynağı yüklendi: {selected_source_name}")
                 st.caption(selected_resource_label)
 
@@ -593,12 +624,173 @@ else:
         selected_resource_label = "Lokal CSV"
 
 
+elif mode == "Türkiye Geneli CKAN Taraması":
+    selected_source_name = "Türkiye Geneli CKAN Taraması"
+    selected_resource_label = "Çoklu CKAN resource birleşimi"
+    deep_scan = True
+
+    st.sidebar.markdown("### Türkiye Geneli Tarama")
+
+    rows_per_query = st.sidebar.slider(
+        "Kaynak başına arama derinliği",
+        min_value=10,
+        max_value=100,
+        value=50,
+        step=10,
+        help="Her açık veri portalında her anahtar kelime için kaç paket aranacağını belirler.",
+    )
+
+    max_resources_to_load = st.sidebar.slider(
+        "İçeri alınacak maksimum resource",
+        min_value=1,
+        max_value=50,
+        value=15,
+        step=1,
+        help="Çok yüksek seçersen uygulama yavaşlayabilir.",
+    )
+
+    auto_load = st.sidebar.checkbox(
+        "Bulunan uygun kaynakları otomatik içeri al",
+        value=True,
+        help="Kapalı olursa bulunan resource'lar arasından elle seçim yapabilirsin.",
+    )
+
+    try:
+        with st.spinner("Türkiye geneli CKAN portalları taranıyor..."):
+            resources = search_turkiye_ckan_resources(
+                rows_per_query=rows_per_query
+            )
+
+        if not resources:
+            st.warning(
+                "Türkiye geneli taramada uygun resource bulunamadı. Lokal demo veri kullanılıyor."
+            )
+            raw_df = load_local_data(LOCAL_FILE)
+            selected_source_name = "Fallback Demo CSV"
+            selected_resource_label = "Lokal CSV"
+
+        else:
+            resources_df = pd.DataFrame(resources)
+
+            st.success(
+                f"Türkiye geneli taramada {len(resources)} uygun resource adayı bulundu."
+            )
+
+            with st.expander("🇹🇷 Türkiye Geneli Bulunan Resource Adayları", expanded=False):
+                display_cols = [
+                    "source_portal",
+                    "package",
+                    "name",
+                    "format",
+                    "matched_query",
+                    "package_modified",
+                    "resource_last_modified",
+                    "url",
+                ]
+
+                existing_cols = [c for c in display_cols if c in resources_df.columns]
+
+                st.dataframe(
+                    resources_df[existing_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            if auto_load:
+                selected_resources = resources[:max_resources_to_load]
+
+            else:
+                labels = [
+                    (
+                        f"{r.get('source_portal', '-')} | "
+                        f"{r.get('package', '-')} | "
+                        f"{r.get('name', '-')} | "
+                        f"{r.get('format', '').upper()} | "
+                        f"{r.get('matched_query', '-')}"
+                    )
+                    for r in resources
+                ]
+
+                selected_labels = st.sidebar.multiselect(
+                    "İçeri alınacak resource seç",
+                    labels,
+                    default=labels[: min(max_resources_to_load, len(labels))],
+                )
+
+                selected_resources = [
+                    resources[labels.index(label)]
+                    for label in selected_labels
+                ]
+
+            if not selected_resources:
+                st.warning("Resource seçilmedi. Lokal demo veri kullanılıyor.")
+                raw_df = load_local_data(LOCAL_FILE)
+                selected_source_name = "Fallback Demo CSV"
+                selected_resource_label = "Lokal CSV"
+
+            else:
+                with st.spinner("Seçilen Türkiye geneli resource dosyaları içeri alınıyor..."):
+                    raw_df, loaded_resources, failed_resources = load_multiple_resources(
+                        selected_resources,
+                        max_resources=max_resources_to_load,
+                    )
+
+                failed_resource_count = len(failed_resources)
+
+                if raw_df.empty:
+                    st.warning(
+                        "Seçilen resource dosyaları okunamadı veya boş geldi. Lokal demo veri kullanılıyor."
+                    )
+                    raw_df = load_local_data(LOCAL_FILE)
+                    selected_source_name = "Fallback Demo CSV"
+                    selected_resource_label = "Lokal CSV"
+
+                else:
+                    loaded_resources_info = pd.DataFrame(loaded_resources)
+
+                    st.success(
+                        f"{len(loaded_resources)} resource başarıyla içeri alındı. "
+                        f"{failed_resource_count} resource okunamadı/boş geldi."
+                    )
+
+                    with st.expander("İçeri Alınan Resource Listesi", expanded=False):
+                        if not loaded_resources_info.empty:
+                            display_cols = [
+                                "source_portal",
+                                "package",
+                                "name",
+                                "format",
+                                "matched_query",
+                                "url",
+                            ]
+
+                            existing_cols = [
+                                c
+                                for c in display_cols
+                                if c in loaded_resources_info.columns
+                            ]
+
+                            st.dataframe(
+                                loaded_resources_info[existing_cols],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+    except Exception as e:
+        st.warning("Türkiye geneli tarama başarısız oldu. Lokal demo veri kullanılıyor.")
+        st.error(str(e))
+        raw_df = load_local_data(LOCAL_FILE)
+        selected_source_name = "Fallback Demo CSV"
+        selected_resource_label = "Lokal CSV"
+
+
+# ---------------------------------------------------------
+# Normalize + Risk + Snapshot
+# ---------------------------------------------------------
 df = normalize_columns(raw_df)
 df = calculate_risk(df)
 df = create_action_recommendations(df)
 
-# Günlük tarihsel snapshot kaydı.
-# Aynı gün + aynı kaynak + aynı resource + aynı kayıt için mükerrer satır oluşmaz.
 history_df = append_snapshot(
     df=df,
     source_name=selected_source_name,
@@ -607,6 +799,10 @@ history_df = append_snapshot(
 
 history_summary_df = build_history_summary(history_df)
 
+
+# ---------------------------------------------------------
+# Sidebar Filters
+# ---------------------------------------------------------
 st.sidebar.header("Filtreler")
 
 districts = sorted(df["district"].dropna().astype(str).unique().tolist())
@@ -647,19 +843,32 @@ if show_only_valid_coordinates:
 
 district_summary = build_district_summary(filtered_df)
 
+
+# ---------------------------------------------------------
+# Info Box + KPIs
+# ---------------------------------------------------------
 with st.expander("ℹ️ Prototip Bilgisi", expanded=False):
     render_methodology_note()
     st.write(f"**Aktif veri kaynağı:** {selected_source_name}")
     st.write(f"**Resource:** {selected_resource_label}")
     st.write(f"**Derin CKAN taraması:** {'Açık' if deep_scan else 'Kapalı'}")
-    st.write(
-        "**Tarihsel snapshot dosyası:** `data/history/shelter_history.csv`"
-    )
+    st.write("**Tarihsel snapshot dosyası:** `data/history/shelter_history.csv`")
+
+    if mode == "Türkiye Geneli CKAN Taraması":
+        st.write(f"**Türkiye geneli kaynak sayısı:** {len(TURKIYE_CKAN_SOURCES)}")
+        st.write(f"**Başarısız/boş resource sayısı:** {failed_resource_count}")
+
+        if not loaded_resources_info.empty:
+            st.write(f"**İçeri alınan resource sayısı:** {len(loaded_resources_info)}")
 
 render_kpis(filtered_df)
 
 st.divider()
 
+
+# ---------------------------------------------------------
+# Map + Detail
+# ---------------------------------------------------------
 left, right = st.columns([2.2, 1])
 
 with left:
@@ -683,6 +892,10 @@ with right:
 
 st.divider()
 
+
+# ---------------------------------------------------------
+# Dashboard Tabs
+# ---------------------------------------------------------
 st.subheader("📊 Dashboard")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
@@ -710,12 +923,15 @@ with tab1:
         "name",
         "city",
         "district",
+        "source_portal",
         "risk_level",
         "risk_score",
         "occupancy_rate",
         "animals_per_vet",
         "recommended_action",
     ]
+
+    priority_cols = [c for c in priority_cols if c in filtered_df.columns]
 
     st.dataframe(
         filtered_df.sort_values("risk_score", ascending=False)[priority_cols],
@@ -751,6 +967,8 @@ with tab5:
         "name",
         "city",
         "district",
+        "source_portal",
+        "source_resource",
         "coordinate_valid",
         "is_estimated",
         "capacity_estimated",
@@ -758,6 +976,8 @@ with tab5:
         "vet_count_estimated",
         "data_quality_note",
     ]
+
+    quality_cols = [c for c in quality_cols if c in filtered_df.columns]
 
     st.markdown("#### Veri Kalitesi Detayı")
 
@@ -800,6 +1020,7 @@ with tab8:
         - İl/ilçe bazlı operasyonel planlamaya destek olmak
         - Geçmiş veriler üzerinden değişim analizi yapmak
         - Eski/güncel açık veri kaynaklarını birlikte izlemek
+        - Türkiye geneli açık veri portallarından CKAN tabanlı veri taramak
 
         #### Geçmiş analitik yaklaşımı
 
@@ -812,6 +1033,13 @@ with tab8:
         - Hangi merkez yeni eklendi veya veri kaynağından çıktı?
         - Tahmini veri kullanılan kayıt sayısı zamanla azaldı mı?
 
+        #### Türkiye geneli tarama yaklaşımı
+
+        Türkiye geneli tarama modunda sistem, bilinen CKAN tabanlı açık veri portallarında
+        hayvan, barınak, bakımevi, veteriner, kısırlaştırma ve rehabilitasyon gibi anahtar
+        kelimelerle resource araması yapar. Bulunan CSV, XLSX, XLS, JSON ve ODS kaynaklarını
+        okuyarak tek veri setinde birleştirir.
+
         #### Önerilen sonraki aşamalar
 
         1. Ulusal veri standardı oluşturulması  
@@ -821,6 +1049,8 @@ with tab8:
         5. Gerçek zamanlı kapasite ve vaka takibi  
         6. Bakanlık düzeyinde izleme ve raporlama ekranı  
         7. Zaman serisi tabanlı erken uyarı sistemi  
+        8. CKAN dışı belediye web sayfaları için kontrollü scraping modülü  
+        9. Manuel Excel/CSV yükleme ekranı  
 
         > Not: Bu uygulama resmi bir sistem değil, karar destek amaçlı çalışan prototip bir yazılımdır.
         """
