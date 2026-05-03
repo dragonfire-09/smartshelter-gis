@@ -1,554 +1,279 @@
 import re
-import unicodedata
-
 import pandas as pd
 
 
-TURKEY_CITY_KEYWORDS = {
-    "ibb": "İstanbul",
-    "istanbul": "İstanbul",
-    "b40": "İstanbul",
-    "kadıköy": "İstanbul",
-    "kadikoy": "İstanbul",
-    "tuzla": "İstanbul",
-    "izmir": "İzmir",
-    "bizizmir": "İzmir",
-    "kocaeli": "Kocaeli",
-    "konya": "Konya",
-    "ordu": "Ordu",
-    "gaziantep": "Gaziantep",
+# ---------------------------------------------------------
+# Column synonyms
+# ---------------------------------------------------------
+COLUMN_ALIASES = {
+    "name": [
+        "name", "ad", "adi", "ad_", "merkez_adi", "tesis_adi",
+        "barinak_adi", "kurum_adi", "kuruluş", "kurulus", "tesis",
+    ],
+    "city": [
+        "city", "il", "il_adi", "sehir", "şehir", "il_ad",
+    ],
+    "district": [
+        "district", "ilce", "ilce_adi", "ilçe", "ilçe_adi",
+    ],
+    "capacity": [
+        "capacity", "kapasite", "barinak_kapasitesi", "kapasite_sayisi",
+    ],
+    "occupancy": [
+        "occupancy", "mevcut", "mevcut_hayvan", "hayvan_sayisi",
+        "barinaktaki_hayvan_sayisi", "mevcut_hayvan_sayisi",
+    ],
+    "vet_count": [
+        "vet_count", "veteriner_sayisi", "veteriner",
+        "veteriner_hekim_sayisi", "veteriner_hekim",
+    ],
+    "sterilization_count": [
+        "sterilization_count", "kisirlastirma", "kisirlastirma_sayisi",
+        "kısırlaştırma", "kisirlastirilan",
+    ],
+    "adoption_count": [
+        "adoption_count", "sahiplendirme", "sahiplendirme_sayisi",
+        "sahiplendirilen",
+    ],
+    "latitude": ["latitude", "lat", "enlem", "y"],
+    "longitude": ["longitude", "lon", "lng", "boylam", "x"],
 }
 
 
-ISTANBUL_DISTRICTS = {
-    "ADALAR",
-    "ARNAVUTKÖY",
-    "ATAŞEHİR",
-    "AVCILAR",
-    "BAĞCILAR",
-    "BAHÇELİEVLER",
-    "BAKIRKÖY",
-    "BAŞAKŞEHİR",
-    "BAYRAMPAŞA",
-    "BEŞİKTAŞ",
-    "BEYKOZ",
-    "BEYLİKDÜZÜ",
-    "BEYOĞLU",
-    "BÜYÜKÇEKMECE",
-    "ÇATALCA",
-    "ÇEKMEKÖY",
-    "ESENLER",
-    "ESENYURT",
-    "EYÜPSULTAN",
-    "FATİH",
-    "GAZİOSMANPAŞA",
-    "GÜNGÖREN",
-    "KADIKÖY",
-    "KAĞITHANE",
-    "KARTAL",
-    "KÜÇÜKÇEKMECE",
-    "MALTEPE",
-    "PENDİK",
-    "SANCAKTEPE",
-    "SARIYER",
-    "SİLİVRİ",
-    "SULTANBEYLİ",
-    "SULTANGAZİ",
-    "ŞİLE",
-    "ŞİŞLİ",
-    "TUZLA",
-    "ÜMRANİYE",
-    "ÜSKÜDAR",
-    "ZEYTİNBURNU",
-}
+def _canonical_key(col: str) -> str:
+    if not isinstance(col, str):
+        return ""
 
-
-def slugify_column(col):
-    col = str(col).strip().lower()
-    col = unicodedata.normalize("NFKD", col)
-    col = col.encode("ascii", "ignore").decode("ascii")
-    col = re.sub(r"[^a-z0-9]+", "_", col)
-    col = col.strip("_")
-    return col
-
-
-def parse_numeric_series(series):
-    s = series.astype(str).str.strip()
-
-    s = s.replace(
-        {
-            "": None,
-            "nan": None,
-            "None": None,
-            "NONE": None,
-            "-": None,
-            "Yok": None,
-            "yok": None,
-        }
+    s = col.strip().lower()
+    s = (
+        s.replace("ı", "i")
+        .replace("İ", "i")
+        .replace("ş", "s")
+        .replace("Ş", "s")
+        .replace("ğ", "g")
+        .replace("Ğ", "g")
+        .replace("ü", "u")
+        .replace("Ü", "u")
+        .replace("ö", "o")
+        .replace("Ö", "o")
+        .replace("ç", "c")
+        .replace("Ç", "c")
     )
-
-    comma_mask = s.str.contains(",", regex=False, na=False)
-
-    s.loc[comma_mask] = (
-        s.loc[comma_mask]
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
-    )
-
-    return pd.to_numeric(s, errors="coerce")
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
 
 
-def coalesce_duplicate_columns(df):
-    duplicated_names = df.columns[df.columns.duplicated()].unique().tolist()
+def _detect_columns(df: pd.DataFrame) -> dict:
+    """Var olan kolonları hedef alanlara map'le. Yoksa atlanır."""
+    mapping = {}
+    available = {_canonical_key(c): c for c in df.columns}
 
-    for col in duplicated_names:
-        same_cols = df.loc[:, df.columns == col]
-        combined = same_cols.bfill(axis=1).iloc[:, 0]
-        df = df.drop(columns=same_cols.columns)
-        df[col] = combined
+    for target, aliases in COLUMN_ALIASES.items():
+        for alias in aliases:
+            key = _canonical_key(alias)
+            if key in available:
+                mapping[target] = available[key]
+                break
 
-    return df
-
-
-def infer_city_from_text(text):
-    text = str(text).lower()
-
-    for key, city in TURKEY_CITY_KEYWORDS.items():
-        if key in text:
-            return city
-
-    return ""
+    return mapping
 
 
-def infer_city_and_district(df):
-    if "source_portal" not in df.columns:
-        df["source_portal"] = ""
+def _classify_resource_category(row) -> str:
+    """Resource adı / paket adından kaba kategori tahmini."""
+    parts = " ".join(
+        str(row.get(c, "")) for c in ["name", "package", "matched_query", "source_resource"]
+    ).lower()
 
-    if "source_resource" not in df.columns:
-        df["source_resource"] = ""
-
-    source_text = (
-        df["source_portal"].astype(str)
-        + " "
-        + df["source_resource"].astype(str)
-    )
-
-    city_inferred = source_text.apply(infer_city_from_text)
-
-    empty_city_mask = (
-        df["city"].astype(str).str.strip().isin(["", "nan", "Belirtilmemiş"])
-    )
-
-    df.loc[empty_city_mask & city_inferred.ne(""), "city"] = city_inferred[
-        empty_city_mask & city_inferred.ne("")
+    irrelevant_keywords = [
+        "vektor", "vektör", "ilaclama", "ilaçlama", "haşere",
+        "sivrisinek", "fare", "kemirgen", "böcek", "bocek",
     ]
+    if any(k in parts for k in irrelevant_keywords):
+        return "irrelevant"
 
-    # İlçe İstanbul ilçelerinden biriyse ve şehir boşsa İstanbul yap
-    district_upper = df["district"].astype(str).str.upper().str.strip()
+    stats_keywords = [
+        "istatistik", "yıllara", "yillara", "evcil hayvan varlığı",
+        "evcil hayvan varligi", "hane", "denetim", "uygulama sayilari",
+        "uygulama sayıları",
+    ]
+    if any(k in parts for k in stats_keywords):
+        return "operation_stats"
 
-    ist_mask = district_upper.isin(ISTANBUL_DISTRICTS)
+    health_keywords = [
+        "sağlık kurum", "saglik kurum", "sağlık tesis", "saglik tesis",
+        "hastane", "kuruluş",
+    ]
+    if any(k in parts for k in health_keywords):
+        return "general_health"
 
-    df.loc[
-        empty_city_mask & ist_mask,
-        "city",
-    ] = "İstanbul"
+    shelter_keywords = [
+        "barınak", "barinak", "bakimevi", "bakımevi",
+        "geçici hayvan bakım", "gecici hayvan bakim",
+        "rehabilitasyon",
+    ]
+    if any(k in parts for k in shelter_keywords):
+        return "shelter_facility"
 
-    return df
-
-
-def build_name_from_source(df):
-    default_name_mask = (
-        df["name"].astype(str).str.strip().isin(
-            ["", "nan", "Hayvan Bakımevi / Toplama Merkezi"]
-        )
-    )
-
-    # İlçe varsa: "Kadıköy Hayvan Bakımevi / Barınak Verisi"
-    district_ok = df["district"].astype(str).str.strip().ne("Belirtilmemiş")
-
-    df.loc[
-        default_name_mask & district_ok,
-        "name",
-    ] = (
-        df.loc[default_name_mask & district_ok, "district"].astype(str)
-        + " Hayvan Bakımevi / Barınak Verisi"
-    )
-
-    # Hala boşsa source_resource'tan üret
-    default_name_mask = (
-        df["name"].astype(str).str.strip().isin(
-            ["", "nan", "Hayvan Bakımevi / Toplama Merkezi"]
-        )
-    )
-
-    has_source_resource = df["source_resource"].astype(str).str.strip().ne("")
-
-    df.loc[
-        default_name_mask & has_source_resource,
-        "name",
-    ] = (
-        df.loc[default_name_mask & has_source_resource, "source_resource"]
-        .astype(str)
-        .str.split("|")
-        .str[-1]
-        .str.replace(".csv", "", regex=False)
-        .str.replace(".xlsx", "", regex=False)
-        .str.replace(".xls", "", regex=False)
-        .str.replace("_", " ", regex=False)
-        .str.strip()
-    )
-
-    return df
+    return "unknown"
 
 
-def normalize_columns(df):
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Kaynaktaki kolonları hedef şemaya map'ler.
+    EKSİK ALANLARI ASLA TAHMİNLE DOLDURMAZ — boş bırakır.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     df = df.copy()
+    mapping = _detect_columns(df)
 
-    if df.empty:
-        return create_empty_normalized_df()
+    target_columns = list(COLUMN_ALIASES.keys())
 
-    df.columns = [slugify_column(c) for c in df.columns]
+    out = pd.DataFrame(index=df.index)
 
-    rename_map = {}
+    # Kolonları taşı (yoksa NaN bırak)
+    for target in target_columns:
+        if target in mapping:
+            out[target] = df[mapping[target]]
+        else:
+            out[target] = pd.NA
 
-    name_candidates = [
-        "adi",
-        "ad",
-        "isim",
-        "tesis_adi",
-        "merkez_adi",
-        "barinak_adi",
-        "bakimevi_adi",
-        "hayvan_bakimevi_adi",
-        "kurum_adi",
-        "birim_adi",
-        "tesis",
-        "merkez",
-        "barinak",
-        "bakimevi",
-        "facility_name",
-        "name",
-        "aciklama",
-        "description",
-    ]
-
-    district_candidates = [
-        "ilce",
-        "ilce_adi",
-        "district",
-        "ilcesi",
-        "ilce_ismi",
-    ]
-
-    city_candidates = [
-        "il",
-        "il_adi",
-        "city",
-        "sehir",
-        "province",
-    ]
-
-    lat_candidates = [
-        "enlem",
-        "lat",
-        "latitude",
-        "y",
-        "koordinat_y",
-        "koordinat_enlem",
-    ]
-
-    lon_candidates = [
-        "boylam",
-        "lon",
-        "lng",
-        "longitude",
-        "x",
-        "koordinat_x",
-        "koordinat_boylam",
-    ]
-
-    capacity_candidates_contains = [
-        "kapasite",
-        "capacity",
-        "kapasitesi",
-        "animal_shelter_capacity",
-        "shelter_capacity",
-    ]
-
-    shelter_count_candidates_contains = [
-        "barinak_sayisi",
-        "barınak_sayısı",
-        "shelter_count",
-        "number_of_shelter",
-        "number_of_animal_shelter",
-    ]
-
-    for c in df.columns:
-        if c in name_candidates:
-            rename_map[c] = "name"
-
-        elif c in district_candidates:
-            rename_map[c] = "district"
-
-        elif c in city_candidates:
-            rename_map[c] = "city"
-
-        elif c in lat_candidates:
-            rename_map[c] = "lat"
-
-        elif c in lon_candidates:
-            rename_map[c] = "lon"
-
-        elif any(k in c for k in capacity_candidates_contains):
-            rename_map[c] = "capacity"
-
-        elif any(k in c for k in shelter_count_candidates_contains):
-            rename_map[c] = "shelter_count"
-
-        elif (
-            "doluluk" in c
-            or "mevcut" in c
-            or "hayvan_sayisi" in c
-            or "hayvan_adedi" in c
-            or "barinan_hayvan" in c
-            or "occupancy" in c
-            or "current_animal" in c
-        ):
-            rename_map[c] = "occupancy"
-
-        elif "veteriner" in c or c == "vet" or "vet_count" in c:
-            rename_map[c] = "vet_count"
-
-        elif "kisir" in c or "kisirlastirma" in c or "sterilization" in c:
-            rename_map[c] = "sterilization_count"
-
-        elif "sahip" in c or "sahiplendirme" in c or "adoption" in c:
-            rename_map[c] = "adoption_count"
-
-        elif "adres" in c or "address" in c:
-            rename_map[c] = "address"
-
-        elif "telefon" in c or c == "tel" or "iletisim" in c or "phone" in c:
-            rename_map[c] = "phone"
-
-        elif "tarih" in c or "guncelleme" in c or "updated" in c or "year" == c or "yil" == c:
-            rename_map[c] = "updated_at"
-
-    df = df.rename(columns=rename_map)
-    df = coalesce_duplicate_columns(df)
-
-    required_defaults = {
-        "name": "Hayvan Bakımevi / Toplama Merkezi",
-        "city": "Belirtilmemiş",
-        "district": "Belirtilmemiş",
-        "lat": None,
-        "lon": None,
-        "capacity": None,
-        "occupancy": None,
-        "vet_count": None,
-        "sterilization_count": None,
-        "adoption_count": None,
-        "shelter_count": None,
-        "address": "",
-        "phone": "",
-        "updated_at": "",
-        "source_portal": "",
-        "source_resource": "",
-        "source_url": "",
-        "resource_category": "",
-        "relevance_score": 0,
-    }
-
-    df["data_quality_note"] = ""
-
-    for col, default in required_defaults.items():
-        if col not in df.columns:
-            df[col] = default
-
-    text_cols = [
-        "name",
-        "city",
-        "district",
-        "address",
-        "phone",
-        "updated_at",
+    # Kaynak meta alanlarını koru
+    for meta in [
         "source_portal",
         "source_resource",
         "source_url",
         "resource_category",
-    ]
+        "relevance_score",
+        "package",
+        "matched_query",
+    ]:
+        if meta in df.columns:
+            out[meta] = df[meta]
 
-    for col in text_cols:
-        df[col] = df[col].fillna(required_defaults.get(col, "")).astype(str)
-        df[col] = df[col].replace({"nan": required_defaults.get(col, "")})
-
-    df = build_name_from_source(df)
-    df = infer_city_and_district(df)
-
+    # Sayısal cast
     numeric_cols = [
-        "lat",
-        "lon",
         "capacity",
         "occupancy",
         "vet_count",
         "sterilization_count",
         "adoption_count",
-        "shelter_count",
-        "relevance_score",
+        "latitude",
+        "longitude",
     ]
-
     for col in numeric_cols:
-        df[col] = parse_numeric_series(df[col])
+        out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    # Gerçek alan var mı?
-    df["capacity_available"] = df["capacity"].notna()
-    df["occupancy_available"] = df["occupancy"].notna()
-    df["vet_count_available"] = df["vet_count"].notna()
-    df["sterilization_available"] = df["sterilization_count"].notna()
-    df["adoption_available"] = df["adoption_count"].notna()
-    df["shelter_count_available"] = df["shelter_count"].notna()
+    # Available flag'ler — yalnızca gerçek değer varsa True
+    out["name_available"] = out["name"].notna() & out["name"].astype(str).str.strip().ne("")
+    out["city_available"] = out["city"].notna() & out["city"].astype(str).str.strip().ne("")
+    out["capacity_available"] = out["capacity"].notna() & (out["capacity"] > 0)
+    out["occupancy_available"] = out["occupancy"].notna() & (out["occupancy"] >= 0)
+    out["vet_count_available"] = out["vet_count"].notna() & (out["vet_count"] >= 0)
 
-    # Geriye dönük uyumluluk için estimated kolonları
-    df["capacity_estimated"] = ~df["capacity_available"]
-    df["occupancy_estimated"] = ~df["occupancy_available"]
-    df["vet_count_estimated"] = ~df["vet_count_available"]
-    df["sterilization_count_estimated"] = ~df["sterilization_available"]
-    df["adoption_count_estimated"] = ~df["adoption_available"]
+    # Koordinat doğrulama
+    lat_ok = out["latitude"].between(-90, 90)
+    lon_ok = out["longitude"].between(-180, 180)
+    out["coordinate_valid"] = lat_ok & lon_ok
 
-    # Eksik sayısal alanları hesaplama kırılmasın diye 0 ile dolduruyoruz,
-    # ama artık bunlar risk_ready değilse risk hesabına sokulmayacak.
-    fill_values = {
-        "capacity": 0,
-        "occupancy": 0,
-        "vet_count": 0,
-        "sterilization_count": 0,
-        "adoption_count": 0,
-        "shelter_count": 0,
-    }
+    # Resource kategori (kaynak verisinden geliyorsa onu kullan, yoksa türet)
+    if "resource_category" not in out.columns or out["resource_category"].isna().all():
+        out["resource_category"] = out.apply(_classify_resource_category, axis=1)
+    else:
+        # Boş satırlar için türet
+        empty_mask = out["resource_category"].isna() | out["resource_category"].astype(str).str.strip().eq("")
+        if empty_mask.any():
+            out.loc[empty_mask, "resource_category"] = out.loc[empty_mask].apply(
+                _classify_resource_category, axis=1
+            )
 
-    for col, val in fill_values.items():
-        df[col] = df[col].fillna(val)
+    # Data scope
+    def _scope(row):
+        cat = str(row.get("resource_category", "")).lower()
+        if cat in ["irrelevant", "operation_stats", "general_health"]:
+            return "operation_stats"
 
-    df["coordinate_valid"] = (
-        df["lat"].notna()
-        & df["lon"].notna()
-        & df["lat"].between(35, 43)
-        & df["lon"].between(25, 46)
-    )
+        if row.get("capacity_available") and row.get("occupancy_available") and row.get("name_available"):
+            return "risk_ready"
 
-    # Veri kapsamı sınıflandırması
-    df["data_scope"] = "excluded"
+        if row.get("capacity_available") and row.get("name_available"):
+            return "capacity_only"
 
-    risk_ready_mask = (
-        df["capacity_available"]
-        & df["occupancy_available"]
-        & df["capacity"].gt(0)
-    )
+        if row.get("coordinate_valid") and row.get("name_available"):
+            return "location_only"
 
-    capacity_only_mask = (
-        df["capacity_available"]
-        & ~df["occupancy_available"]
-        & df["capacity"].gt(0)
-    )
+        return "unknown"
 
-    location_only_mask = (
-        df["coordinate_valid"]
-        & ~df["capacity_available"]
-        & ~df["occupancy_available"]
-    )
+    out["data_scope"] = out.apply(_scope, axis=1)
 
-    stats_mask = (
-        df["resource_category"].astype(str).eq("operation_stats")
-        | df["shelter_count_available"]
-    )
+    # Eligibility — KATI
+    out["risk_eligible"] = out["data_scope"].eq("risk_ready")
 
-    df.loc[risk_ready_mask, "data_scope"] = "risk_ready"
-    df.loc[capacity_only_mask, "data_scope"] = "capacity_only"
-    df.loc[location_only_mask, "data_scope"] = "location_only"
-    df.loc[stats_mask & ~risk_ready_mask & ~capacity_only_mask, "data_scope"] = "operation_stats"
-
-    df["analytics_eligible"] = df["data_scope"].isin(
+    out["analytics_eligible"] = out["data_scope"].isin(
         ["risk_ready", "capacity_only", "location_only"]
+    ) & out["name_available"]
+
+    # Exclusion reason
+    def _exclusion_reason(row):
+        reasons = []
+
+        if not row.get("name_available"):
+            reasons.append("isim alanı yok")
+
+        cat = str(row.get("resource_category", "")).lower()
+        if cat == "irrelevant":
+            reasons.append("ilgisiz kaynak (vektör/haşere ilaçlama vb.)")
+        if cat == "operation_stats":
+            reasons.append("operasyonel istatistik kaynağı")
+        if cat == "general_health":
+            reasons.append("genel sağlık kurum kaynağı (barınak değil)")
+
+        if not row.get("capacity_available") and not row.get("coordinate_valid"):
+            reasons.append("kapasite ve koordinat yok")
+
+        return "; ".join(reasons)
+
+    out["analytics_exclusion_reason"] = out.apply(
+        lambda r: _exclusion_reason(r) if not r["analytics_eligible"] else "",
+        axis=1,
     )
 
-    df["risk_eligible"] = df["data_scope"].eq("risk_ready")
+    # Türetilmiş alanlar (yalnızca gerçek veri varsa)
+    out["occupancy_rate"] = pd.NA
+    valid_op = out["capacity_available"] & out["occupancy_available"]
+    out.loc[valid_op, "occupancy_rate"] = (
+        (out.loc[valid_op, "occupancy"] / out.loc[valid_op, "capacity"]) * 100
+    ).round(1)
 
-    df["analytics_exclusion_reason"] = ""
+    out["animals_per_vet"] = pd.NA
+    valid_vet = out["occupancy_available"] & out["vet_count_available"] & (out["vet_count"] > 0)
+    out.loc[valid_vet, "animals_per_vet"] = (
+        out.loc[valid_vet, "occupancy"] / out.loc[valid_vet, "vet_count"]
+    ).round(1)
 
-    df.loc[
-        df["data_scope"].eq("excluded"),
-        "analytics_exclusion_reason",
-    ] = "kapasite, mevcut hayvan veya konum verisi ana analitik için yeterli değil; "
+    # Kalite notu — uydurma yok, sadece gerçek eksiklikler
+    def _quality_note(row):
+        notes = []
+        for col_label, col_flag in [
+            ("name", "name_available"),
+            ("city", "city_available"),
+            ("capacity", "capacity_available"),
+            ("occupancy", "occupancy_available"),
+            ("vet_count", "vet_count_available"),
+        ]:
+            if not row.get(col_flag):
+                notes.append(f"{col_label} alanı kaynakta yok")
 
-    df.loc[
-        df["city"].astype(str).str.strip().isin(["", "nan", "Belirtilmemiş"]),
-        "data_quality_note",
-    ] += "il bilgisi kaynakta yok veya çıkarılamadı; "
+        if not row.get("coordinate_valid"):
+            notes.append("koordinat eksik/geçersiz")
 
-    df.loc[
-        df["district"].astype(str).str.strip().isin(["", "nan", "Belirtilmemiş"]),
-        "data_quality_note",
-    ] += "ilçe bilgisi kaynakta yok; "
+        return "; ".join(notes)
 
-    df.loc[
-        ~df["capacity_available"],
-        "data_quality_note",
-    ] += "kapasite alanı kaynakta yok; "
+    out["data_quality_note"] = out.apply(_quality_note, axis=1)
 
-    df.loc[
-        ~df["occupancy_available"],
-        "data_quality_note",
-    ] += "mevcut hayvan alanı kaynakta yok; "
-
-    df.loc[
-        ~df["coordinate_valid"],
-        "data_quality_note",
-    ] += "koordinat eksik/geçersiz; "
-
-    df["is_estimated"] = df["data_quality_note"].str.strip().ne("")
-
-    return df
-
-
-def create_empty_normalized_df():
-    columns = [
-        "name",
-        "city",
-        "district",
-        "lat",
-        "lon",
-        "capacity",
-        "occupancy",
-        "vet_count",
-        "sterilization_count",
-        "adoption_count",
-        "shelter_count",
-        "address",
-        "phone",
-        "updated_at",
-        "source_portal",
-        "source_resource",
-        "source_url",
-        "resource_category",
-        "relevance_score",
-        "capacity_available",
-        "occupancy_available",
-        "vet_count_available",
-        "sterilization_available",
-        "adoption_available",
-        "shelter_count_available",
-        "capacity_estimated",
-        "occupancy_estimated",
-        "vet_count_estimated",
-        "sterilization_count_estimated",
-        "adoption_count_estimated",
-        "coordinate_valid",
-        "data_scope",
-        "analytics_eligible",
-        "risk_eligible",
-        "analytics_exclusion_reason",
-        "data_quality_note",
-        "is_estimated",
-    ]
-
-    return pd.DataFrame(columns=columns)
+    return out
