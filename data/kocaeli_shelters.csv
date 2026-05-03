@@ -1,0 +1,4 @@
+name,city,district,lat,lon,capacity,occupancy,vet_count,sterilization_count,adoption_count
+Kocaeli Sokak Hayvanları Toplama Merkezi,Kocaeli,İzmit,40.7654,29.9408,500,430,4,1200,320
+Gebze Hayvan Toplama Merkezi,Kocaeli,Gebze,40.8028,29.4307,300,285,2,850,180
+İzmit Geçici Hayvan Bakımevi,Kocaeli,İzmit,40.7666,29.9169,250,180,3,640,210
