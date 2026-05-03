@@ -4,6 +4,13 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
+from src.ai_insights import (
+    calculate_data_quality_score,
+    detect_anomalies,
+    generate_executive_summary,
+    generate_risk_explanations,
+    simulate_interventions,
+)
 from src.charts import (
     build_district_summary,
     chart_district_avg_risk,
@@ -130,6 +137,10 @@ def render_methodology_note():
         kısırlaştırma performansı gibi göstergelerden hesaplanan örnek bir
         önceliklendirme skorudur.
 
+        AI Analiz bölümü harici AI API kullanmadan, şeffaf ve kural tabanlı çalışır.
+        Sistem yönetici özeti, risk açıklaması, veri kalite skoru, anomali tespiti
+        ve senaryo simülasyonu üretir.
+
         Geçmiş analitik modülü, uygulamanın çektiği verileri günlük snapshot olarak saklar.
         Kaynak sistem eski tarihli resource yayınlıyorsa derin CKAN taramasıyla listelenebilir.
         Kaynak yalnızca güncel dosya yayınlıyorsa, uygulama bundan sonraki her çekimi kendi
@@ -211,6 +222,9 @@ def render_record_detail(df: pd.DataFrame):
     if item.get("source_portal", ""):
         st.write(f"**Kaynak Portal:** {item.get('source_portal', '')}")
 
+    if item.get("source_resource", ""):
+        st.write(f"**Kaynak Resource:** {item.get('source_resource', '')}")
+
     st.write(f"**Kapasite:** {int(item['capacity'])}")
     st.write(f"**Mevcut Hayvan:** {int(item['occupancy'])}")
     st.write(f"**Doluluk Oranı:** %{item['occupancy_rate']}")
@@ -232,6 +246,16 @@ def render_record_detail(df: pd.DataFrame):
     st.markdown("#### Önerilen Aksiyon")
     st.write(item["recommended_action"])
 
+    if "risk_explanation" in item and str(item.get("risk_explanation", "")).strip():
+        st.markdown("#### AI Risk Açıklaması")
+        st.info(item["risk_explanation"])
+
+    if "data_quality_score" in item:
+        st.markdown("#### Veri Kalitesi Skoru")
+        st.write(
+            f"**{int(item['data_quality_score'])}/100** - {item.get('data_quality_level', '')}"
+        )
+
     quality_note = str(item.get("data_quality_note", "")).strip()
 
     if quality_note:
@@ -244,6 +268,7 @@ def render_report_downloads(
     district_summary: pd.DataFrame,
     history_df: pd.DataFrame,
     history_summary_df: pd.DataFrame,
+    anomalies_df: pd.DataFrame,
 ):
     st.subheader("📥 Güncel Rapor İndirme")
 
@@ -269,6 +294,22 @@ def render_report_downloads(
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+
+    st.markdown("---")
+    st.subheader("🤖 AI Analiz Raporları")
+
+    if anomalies_df is not None and not anomalies_df.empty:
+        anomalies_csv = anomalies_df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            label="AI Anomali Raporu CSV İndir",
+            data=anomalies_csv,
+            file_name="smartshelter_ai_anomalies.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    else:
+        st.info("İndirilecek anomali raporu bulunmuyor.")
 
     st.markdown("---")
     st.subheader("🕒 Tarihsel Veri İndirme")
@@ -482,6 +523,196 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
         use_container_width=True,
         hide_index=True,
     )
+
+
+def render_ai_analysis(
+    filtered_df: pd.DataFrame,
+    history_summary_df: pd.DataFrame,
+    anomalies_df: pd.DataFrame,
+):
+    st.subheader("🤖 AI Analiz ve Karar Destek")
+
+    st.markdown(
+        """
+        Bu bölüm harici AI API kullanmadan, kural tabanlı akıllı analiz üretir.
+        Amaç; yöneticilere hızlı özet, risk açıklaması, anomali tespiti,
+        veri kalite puanı ve müdahale senaryosu sağlamaktır.
+        """
+    )
+
+    ai_summary = generate_executive_summary(
+        df=filtered_df,
+        history_summary_df=history_summary_df,
+        anomalies_df=anomalies_df,
+    )
+
+    st.markdown(ai_summary)
+
+    st.divider()
+
+    st.subheader("🚨 AI Uyarılar / Anomali Tespiti")
+
+    if anomalies_df.empty:
+        st.success("Belirgin anomali tespit edilmedi.")
+    else:
+        a1, a2, a3 = st.columns(3)
+
+        critical_anomaly_count = len(
+            anomalies_df[anomalies_df["severity"] == "Kritik"]
+        )
+        high_anomaly_count = len(
+            anomalies_df[anomalies_df["severity"] == "Yüksek"]
+        )
+        total_anomaly_count = len(anomalies_df)
+
+        a1.metric("Toplam Uyarı", total_anomaly_count)
+        a2.metric("Yüksek Uyarı", high_anomaly_count)
+        a3.metric("Kritik Uyarı", critical_anomaly_count)
+
+        st.dataframe(
+            anomalies_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+
+    st.subheader("📊 Veri Kalitesi Skoru")
+
+    if "data_quality_score" in filtered_df.columns and len(filtered_df) > 0:
+        q1, q2, q3, q4 = st.columns(4)
+
+        q1.metric(
+            "Ortalama Kalite",
+            f"{filtered_df['data_quality_score'].mean():.1f}/100",
+        )
+
+        q2.metric(
+            "Yüksek Kalite",
+            len(filtered_df[filtered_df["data_quality_level"].astype(str) == "Yüksek"]),
+        )
+
+        q3.metric(
+            "Orta Kalite",
+            len(filtered_df[filtered_df["data_quality_level"].astype(str) == "Orta"]),
+        )
+
+        q4.metric(
+            "Düşük Kalite",
+            len(filtered_df[filtered_df["data_quality_level"].astype(str) == "Düşük"]),
+        )
+
+        quality_view_cols = [
+            "name",
+            "city",
+            "district",
+            "source_portal",
+            "data_quality_score",
+            "data_quality_level",
+            "coordinate_valid",
+            "capacity_estimated",
+            "occupancy_estimated",
+            "vet_count_estimated",
+            "data_quality_note",
+        ]
+
+        quality_view_cols = [
+            c for c in quality_view_cols if c in filtered_df.columns
+        ]
+
+        st.dataframe(
+            filtered_df.sort_values("data_quality_score")[quality_view_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.warning("Veri kalitesi skoru üretilemedi.")
+
+    st.divider()
+
+    st.subheader("🧪 Senaryo Simülasyonu")
+
+    st.markdown(
+        """
+        Bu bölümde kapasite, veteriner, sahiplendirme ve kısırlaştırma müdahalelerinin
+        risk skoruna tahmini etkisi hesaplanır.
+        """
+    )
+
+    s1, s2, s3, s4 = st.columns(4)
+
+    with s1:
+        extra_capacity = st.number_input(
+            "+ Kapasite",
+            min_value=0,
+            max_value=5000,
+            value=0,
+            step=10,
+        )
+
+    with s2:
+        extra_vets = st.number_input(
+            "+ Veteriner",
+            min_value=0,
+            max_value=100,
+            value=0,
+            step=1,
+        )
+
+    with s3:
+        extra_adoptions = st.number_input(
+            "+ Sahiplendirme",
+            min_value=0,
+            max_value=5000,
+            value=0,
+            step=10,
+        )
+
+    with s4:
+        extra_sterilizations = st.number_input(
+            "+ Kısırlaştırma",
+            min_value=0,
+            max_value=5000,
+            value=0,
+            step=10,
+        )
+
+    scenario_df = simulate_interventions(
+        filtered_df,
+        extra_capacity=extra_capacity,
+        extra_vets=extra_vets,
+        extra_adoptions=extra_adoptions,
+        extra_sterilizations=extra_sterilizations,
+    )
+
+    if scenario_df.empty:
+        st.warning("Senaryo için uygun kayıt bulunamadı.")
+    else:
+        avg_base_risk = scenario_df["base_risk_score"].mean()
+        avg_scenario_risk = scenario_df["scenario_risk_score"].mean()
+        avg_improvement = scenario_df["risk_score_improvement"].mean()
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric("Mevcut Ortalama Risk", f"{avg_base_risk:.1f}")
+        c2.metric("Senaryo Ortalama Risk", f"{avg_scenario_risk:.1f}")
+        c3.metric("Ortalama İyileşme", f"{avg_improvement:.1f}")
+
+        st.dataframe(
+            scenario_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        scenario_csv = scenario_df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            label="Senaryo Sonucunu CSV İndir",
+            data=scenario_csv,
+            file_name="smartshelter_scenario_simulation.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 
 # ---------------------------------------------------------
@@ -785,11 +1016,15 @@ elif mode == "Türkiye Geneli CKAN Taraması":
 
 
 # ---------------------------------------------------------
-# Normalize + Risk + Snapshot
+# Normalize + Risk + AI Insights + Snapshot
 # ---------------------------------------------------------
 df = normalize_columns(raw_df)
 df = calculate_risk(df)
 df = create_action_recommendations(df)
+
+# Kural tabanlı AI benzeri analizler
+df = calculate_data_quality_score(df)
+df = generate_risk_explanations(df)
 
 history_df = append_snapshot(
     df=df,
@@ -798,6 +1033,11 @@ history_df = append_snapshot(
 )
 
 history_summary_df = build_history_summary(history_df)
+
+anomalies_df = detect_anomalies(
+    history_df=history_df,
+    current_df=df,
+)
 
 
 # ---------------------------------------------------------
@@ -898,12 +1138,13 @@ st.divider()
 # ---------------------------------------------------------
 st.subheader("📊 Dashboard")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
     [
         "Risk Skoru",
         "Doluluk",
         "İlçe Özeti",
         "Geçmiş Analitik",
+        "AI Analiz",
         "Veri Kalitesi",
         "Ham Veri",
         "Rapor",
@@ -928,7 +1169,9 @@ with tab1:
         "risk_score",
         "occupancy_rate",
         "animals_per_vet",
+        "data_quality_score",
         "recommended_action",
+        "risk_explanation",
     ]
 
     priority_cols = [c for c in priority_cols if c in filtered_df.columns]
@@ -961,6 +1204,13 @@ with tab4:
     render_history_analytics(history_df, history_summary_df)
 
 with tab5:
+    render_ai_analysis(
+        filtered_df=filtered_df,
+        history_summary_df=history_summary_df,
+        anomalies_df=anomalies_df,
+    )
+
+with tab6:
     render_data_quality_summary(filtered_df)
 
     quality_cols = [
@@ -969,6 +1219,8 @@ with tab5:
         "district",
         "source_portal",
         "source_resource",
+        "data_quality_score",
+        "data_quality_level",
         "coordinate_valid",
         "is_estimated",
         "capacity_estimated",
@@ -987,22 +1239,23 @@ with tab5:
         hide_index=True,
     )
 
-with tab6:
+with tab7:
     st.dataframe(
         filtered_df,
         use_container_width=True,
         hide_index=True,
     )
 
-with tab7:
+with tab8:
     render_report_downloads(
         filtered_df,
         district_summary,
         history_df,
         history_summary_df,
+        anomalies_df,
     )
 
-with tab8:
+with tab9:
     st.markdown(
         """
         ### 🌍 SmartShelter GIS Vizyonu
@@ -1021,6 +1274,19 @@ with tab8:
         - Geçmiş veriler üzerinden değişim analizi yapmak
         - Eski/güncel açık veri kaynaklarını birlikte izlemek
         - Türkiye geneli açık veri portallarından CKAN tabanlı veri taramak
+        - AI benzeri karar destek analizleri üretmek
+
+        #### AI destekli karar destek yaklaşımı
+
+        Bu prototipte ilk aşama AI modülleri harici model kullanmadan, şeffaf ve kural tabanlı olarak
+        geliştirilmiştir. Sistem şu çıktıları üretebilir:
+
+        - Yönetici özeti
+        - Risk açıklaması
+        - Veri kalite skoru
+        - Anomali tespiti
+        - Müdahale senaryosu simülasyonu
+        - Operasyonel öncelik listesi
 
         #### Geçmiş analitik yaklaşımı
 
@@ -1051,6 +1317,7 @@ with tab8:
         7. Zaman serisi tabanlı erken uyarı sistemi  
         8. CKAN dışı belediye web sayfaları için kontrollü scraping modülü  
         9. Manuel Excel/CSV yükleme ekranı  
+        10. Gerçek AI/LLM destekli doğal dil sorgulama ve otomatik raporlama  
 
         > Not: Bu uygulama resmi bir sistem değil, karar destek amaçlı çalışan prototip bir yazılımdır.
         """
