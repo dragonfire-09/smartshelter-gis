@@ -6,60 +6,94 @@ import streamlit as st
 LOCAL_FILE = "data/kocaeli_shelters.csv"
 
 
+COMMON_DEEP_QUERIES = [
+    "hayvan",
+    "barınak",
+    "barinak",
+    "bakımevi",
+    "bakimevi",
+    "hayvan bakımevi",
+    "hayvan bakimevi",
+    "geçici hayvan bakımevi",
+    "gecici hayvan bakimevi",
+    "toplama merkezi",
+    "hayvan toplama merkezi",
+    "sokak hayvan",
+    "sokak hayvanları",
+    "sahipsiz hayvan",
+    "veteriner",
+    "kısırlaştırma",
+    "kisirlastirma",
+    "rehabilitasyon",
+]
+
+
 CKAN_SOURCES = {
     "Kocaeli Açık Veri": {
         "base": "https://veri.kocaeli.bel.tr",
         "query": "hayvan toplama merkezi",
-        "deep_queries": [
-            "hayvan",
-            "barınak",
-            "barinak",
-            "bakımevi",
-            "bakimevi",
-            "toplama merkezi",
-            "sokak hayvan",
-            "sokak hayvanları",
-            "veteriner",
-            "kısırlaştırma",
-            "kisirlastirma",
-            "rehabilitasyon",
-            "geçici bakımevi",
-            "gecici bakimevi",
-        ],
+        "deep_queries": COMMON_DEEP_QUERIES,
     },
     "Ordu Açık Veri": {
         "base": "https://acikveri.ordu.bel.tr",
         "query": "hayvan bakımevi",
-        "deep_queries": [
-            "hayvan",
-            "barınak",
-            "barinak",
-            "bakımevi",
-            "bakimevi",
-            "sokak hayvan",
-            "sokak hayvanları",
-            "veteriner",
-            "rehabilitasyon",
-            "kısırlaştırma",
-            "kisirlastirma",
-        ],
+        "deep_queries": COMMON_DEEP_QUERIES,
     },
     "B40 İstanbul": {
         "base": "https://opendata.b40cities.org",
         "query": "hayvan bakımevi",
-        "deep_queries": [
-            "hayvan",
-            "barınak",
-            "barinak",
-            "bakımevi",
-            "bakimevi",
-            "sokak hayvan",
-            "sokak hayvanları",
-            "veteriner",
-            "rehabilitasyon",
-            "kısırlaştırma",
-            "kisirlastirma",
-        ],
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+}
+
+
+# Türkiye geneli tarama için bilinen/aday CKAN portalları.
+# Bazıları geçici olarak erişilemeyebilir; kod hata alınca o kaynağı atlar.
+TURKIYE_CKAN_SOURCES = {
+    "İBB Açık Veri": {
+        "base": "https://data.ibb.gov.tr",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "İzmir Açık Veri": {
+        "base": "https://acikveri.bizizmir.com",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "Konya Açık Veri": {
+        "base": "https://acikveri.konya.bel.tr",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "Kocaeli Açık Veri": {
+        "base": "https://veri.kocaeli.bel.tr",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "Ordu Açık Veri": {
+        "base": "https://acikveri.ordu.bel.tr",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "Gaziantep Açık Veri": {
+        "base": "https://acikveri.gaziantep.bel.tr",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "Kadıköy Açık Veri": {
+        "base": "https://acikveri.kadikoy.bel.tr",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "Tuzla Açık Veri": {
+        "base": "https://veri.tuzla.bel.tr",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
+    },
+    "B40 Açık Veri": {
+        "base": "https://opendata.b40cities.org",
+        "query": "hayvan",
+        "deep_queries": COMMON_DEEP_QUERIES,
     },
 }
 
@@ -94,6 +128,49 @@ def infer_format(resource):
     return ""
 
 
+def make_ckan_api_url(base_url):
+    base = base_url.rstrip("/")
+
+    if base.endswith("/api/3"):
+        return f"{base}/action/package_search"
+
+    if base.endswith("/api/3/action"):
+        return f"{base}/package_search"
+
+    return f"{base}/api/3/action/package_search"
+
+
+def is_relevant_resource(resource):
+    """
+    Türkiye geneli taramada çok alakasız dosya gelmesin diye basit uygunluk filtresi.
+    """
+    text = " ".join(
+        [
+            str(resource.get("package", "")),
+            str(resource.get("name", "")),
+            str(resource.get("package_notes", "")),
+            str(resource.get("matched_query", "")),
+        ]
+    ).lower()
+
+    positive_keywords = [
+        "hayvan",
+        "barınak",
+        "barinak",
+        "bakımevi",
+        "bakimevi",
+        "veteriner",
+        "kısır",
+        "kisir",
+        "sahipsiz",
+        "sokak",
+        "rehabilitasyon",
+        "toplama merkezi",
+    ]
+
+    return any(k in text for k in positive_keywords)
+
+
 @st.cache_data(ttl=3600)
 def load_local_data(path=LOCAL_FILE):
     return pd.read_csv(path)
@@ -101,13 +178,7 @@ def load_local_data(path=LOCAL_FILE):
 
 @st.cache_data(ttl=3600)
 def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
-    """
-    CKAN package_search ile kaynak arar.
-
-    deep_queries verilirse sadece ana query değil, eski veya farklı isimlendirilmiş
-    resource'ları bulmak için ek anahtar kelimelerle de arama yapar.
-    """
-    search_url = f"{base_url.rstrip('/')}/api/3/action/package_search"
+    search_url = make_ckan_api_url(base_url)
 
     queries = [query]
 
@@ -158,23 +229,27 @@ def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
 
                 seen_urls.add(url)
 
-                resources.append(
-                    {
-                        "package": package_title,
-                        "package_name": package_name,
-                        "package_notes": package_notes,
-                        "name": name,
-                        "format": fmt,
-                        "url": url,
-                        "resource_id": res.get("id", ""),
-                        "package_created": package_created,
-                        "package_modified": package_modified,
-                        "resource_created": res.get("created", ""),
-                        "resource_last_modified": res.get("last_modified", ""),
-                        "resource_revision_timestamp": res.get("revision_timestamp", ""),
-                        "matched_query": q,
-                    }
-                )
+                item = {
+                    "source_portal": "",
+                    "source_base": base_url,
+                    "package": package_title,
+                    "package_name": package_name,
+                    "package_notes": package_notes,
+                    "name": name,
+                    "format": fmt,
+                    "url": url,
+                    "resource_id": res.get("id", ""),
+                    "package_created": package_created,
+                    "package_modified": package_modified,
+                    "resource_created": res.get("created", ""),
+                    "resource_last_modified": res.get("last_modified", ""),
+                    "resource_revision_timestamp": res.get("revision_timestamp", ""),
+                    "matched_query": q,
+                }
+
+                resources.append(item)
+
+    resources = [r for r in resources if is_relevant_resource(r)]
 
     resources = sorted(
         resources,
@@ -187,6 +262,42 @@ def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
     )
 
     return resources
+
+
+@st.cache_data(ttl=3600)
+def search_turkiye_ckan_resources(rows_per_query=50):
+    all_resources = []
+    seen_urls = set()
+
+    for source_name, source in TURKIYE_CKAN_SOURCES.items():
+        resources = search_ckan_resources(
+            base_url=source["base"],
+            query=source["query"],
+            rows=rows_per_query,
+            deep_queries=source.get("deep_queries", COMMON_DEEP_QUERIES),
+        )
+
+        for r in resources:
+            url = r.get("url", "")
+
+            if not url or url in seen_urls:
+                continue
+
+            seen_urls.add(url)
+            r["source_portal"] = source_name
+            r["source_base"] = source["base"]
+            all_resources.append(r)
+
+    all_resources = sorted(
+        all_resources,
+        key=lambda r: (
+            str(r.get("source_portal", "")),
+            str(r.get("resource_last_modified", "")),
+            str(r.get("package_modified", "")),
+        ),
+    )
+
+    return all_resources
 
 
 @st.cache_data(ttl=3600)
@@ -242,3 +353,50 @@ def load_resource(resource):
                 return pd.DataFrame([data])
 
     return pd.DataFrame()
+
+
+def load_resource_with_metadata(resource):
+    try:
+        df = load_resource(resource)
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+
+    df["source_portal"] = resource.get("source_portal", "")
+    df["source_resource"] = (
+        f"{resource.get('package', '')} | {resource.get('name', '')}"
+    )
+    df["source_url"] = resource.get("url", "")
+    df["source_format"] = resource.get("format", "")
+    df["source_matched_query"] = resource.get("matched_query", "")
+    df["source_package_modified"] = resource.get("package_modified", "")
+    df["source_resource_last_modified"] = resource.get("resource_last_modified", "")
+
+    return df
+
+
+def load_multiple_resources(resources, max_resources=20):
+    frames = []
+    loaded_resources = []
+    failed_resources = []
+
+    for resource in resources[:max_resources]:
+        df = load_resource_with_metadata(resource)
+
+        if df.empty:
+            failed_resources.append(resource)
+            continue
+
+        frames.append(df)
+        loaded_resources.append(resource)
+
+    if not frames:
+        return pd.DataFrame(), loaded_resources, failed_resources
+
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+
+    return combined, loaded_resources, failed_resources
