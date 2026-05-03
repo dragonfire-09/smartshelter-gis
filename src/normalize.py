@@ -26,7 +26,6 @@ def parse_numeric_series(series):
         }
     )
 
-    # Türkiye formatı: 40,7654 -> 40.7654
     comma_mask = s.str.contains(",", regex=False, na=False)
 
     s.loc[comma_mask] = (
@@ -39,11 +38,6 @@ def parse_numeric_series(series):
 
 
 def coalesce_duplicate_columns(df):
-    """
-    Rename işleminden sonra aynı isimde birden fazla kolon oluşabilir.
-    Örneğin hem 'adi' hem 'tesis_adi' kolonları 'name' olabilir.
-    Bu fonksiyon aynı isimli kolonları ilk dolu değer mantığıyla birleştirir.
-    """
     duplicated_names = df.columns[df.columns.duplicated()].unique().tolist()
 
     for col in duplicated_names:
@@ -76,12 +70,17 @@ def normalize_columns(df):
         "hayvan_bakimevi_adi",
         "kurum_adi",
         "birim_adi",
+        "tesis",
+        "merkez",
+        "barinak",
+        "bakimevi",
     ]
 
     district_candidates = [
         "ilce",
         "ilce_adi",
         "district",
+        "ilcesi",
     ]
 
     city_candidates = [
@@ -89,6 +88,7 @@ def normalize_columns(df):
         "il_adi",
         "city",
         "sehir",
+        "province",
     ]
 
     lat_candidates = [
@@ -97,6 +97,7 @@ def normalize_columns(df):
         "latitude",
         "y",
         "koordinat_y",
+        "koordinat_enlem",
     ]
 
     lon_candidates = [
@@ -106,45 +107,60 @@ def normalize_columns(df):
         "longitude",
         "x",
         "koordinat_x",
+        "koordinat_boylam",
     ]
 
     for c in df.columns:
         if c in name_candidates:
             rename_map[c] = "name"
+
         elif c in district_candidates:
             rename_map[c] = "district"
+
         elif c in city_candidates:
             rename_map[c] = "city"
+
         elif c in lat_candidates:
             rename_map[c] = "lat"
+
         elif c in lon_candidates:
             rename_map[c] = "lon"
+
         elif "kapasite" in c:
             rename_map[c] = "capacity"
+
         elif (
             "doluluk" in c
             or "mevcut" in c
             or "hayvan_sayisi" in c
             or "hayvan_adedi" in c
+            or "barinan_hayvan" in c
         ):
             rename_map[c] = "occupancy"
+
         elif "veteriner" in c:
             rename_map[c] = "vet_count"
+
         elif "kisir" in c or "kisirlastirma" in c:
             rename_map[c] = "sterilization_count"
+
         elif "sahip" in c or "sahiplendirme" in c:
             rename_map[c] = "adoption_count"
+
         elif "adres" in c:
             rename_map[c] = "address"
-        elif "telefon" in c or "tel" == c:
+
+        elif "telefon" in c or c == "tel" or "iletisim" in c:
             rename_map[c] = "phone"
-        elif "tarih" in c or "guncelleme" in c:
+
+        elif "tarih" in c or "guncelleme" in c or "updated" in c:
             rename_map[c] = "updated_at"
 
     df = df.rename(columns=rename_map)
     df = coalesce_duplicate_columns(df)
 
-    required_defaults = {
+    # Kritik alanlar: kalite notuna yazılır.
+    critical_defaults = {
         "name": "Hayvan Bakımevi / Toplama Merkezi",
         "city": "Belirtilmemiş",
         "district": "Belirtilmemiş",
@@ -155,6 +171,10 @@ def normalize_columns(df):
         "vet_count": None,
         "sterilization_count": None,
         "adoption_count": None,
+    }
+
+    # Opsiyonel alanlar: eksikse kalite problemi sayılmaz.
+    optional_defaults = {
         "address": "",
         "phone": "",
         "updated_at": "",
@@ -162,10 +182,14 @@ def normalize_columns(df):
 
     df["data_quality_note"] = ""
 
-    for col, default in required_defaults.items():
+    for col, default in critical_defaults.items():
         if col not in df.columns:
             df[col] = default
             df["data_quality_note"] += f"{col} alanı kaynakta yok; "
+
+    for col, default in optional_defaults.items():
+        if col not in df.columns:
+            df[col] = default
 
     text_cols = [
         "name",
@@ -177,8 +201,9 @@ def normalize_columns(df):
     ]
 
     for col in text_cols:
-        df[col] = df[col].fillna(required_defaults.get(col, "")).astype(str)
-        df[col] = df[col].replace({"nan": required_defaults.get(col, "")})
+        default = critical_defaults.get(col, optional_defaults.get(col, ""))
+        df[col] = df[col].fillna(default).astype(str)
+        df[col] = df[col].replace({"nan": default})
 
     numeric_cols = [
         "lat",
@@ -207,7 +232,9 @@ def normalize_columns(df):
 
         missing_mask = df[col].isna()
         df.loc[missing_mask, col] = fallback
-        df.loc[missing_mask, "data_quality_note"] += f"{col} tahmini değerle tamamlandı; "
+        df.loc[missing_mask, "data_quality_note"] += (
+            f"{col} tahmini değerle tamamlandı; "
+        )
 
     df["coordinate_valid"] = (
         df["lat"].notna()
@@ -223,12 +250,21 @@ def normalize_columns(df):
 
     df["is_estimated"] = df["data_quality_note"].str.strip().ne("")
 
-    # Temel temizlik
     df["capacity"] = df["capacity"].clip(lower=1)
     df["occupancy"] = df["occupancy"].clip(lower=0)
     df["vet_count"] = df["vet_count"].clip(lower=0)
     df["sterilization_count"] = df["sterilization_count"].clip(lower=0)
     df["adoption_count"] = df["adoption_count"].clip(lower=0)
+
+    # Türkiye geneli taramada kaynak takibi için kolonlar yoksa oluştur.
+    if "source_portal" not in df.columns:
+        df["source_portal"] = ""
+
+    if "source_resource" not in df.columns:
+        df["source_resource"] = ""
+
+    if "source_url" not in df.columns:
+        df["source_url"] = ""
 
     return df
 
@@ -248,6 +284,9 @@ def create_empty_normalized_df():
         "address",
         "phone",
         "updated_at",
+        "source_portal",
+        "source_resource",
+        "source_url",
         "data_quality_note",
         "capacity_estimated",
         "occupancy_estimated",
