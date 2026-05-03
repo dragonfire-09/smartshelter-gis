@@ -42,9 +42,10 @@ def ensure_history_dir():
 
 def make_record_key(row):
     """
-    Aynı merkezin farklı günlerde eşleşebilmesi için stabil bir anahtar üretir.
-    İdeal durumda bakanlık/belediye ID'si olmalı.
-    Şimdilik city + district + name kombinasyonunu kullanıyoruz.
+    Aynı merkezin farklı tarihlerde eşleşmesi için stabil anahtar üretir.
+
+    İdeal sistemde burada bakanlık/belediye kayıt ID'si kullanılmalı.
+    Prototipte city + district + name kullanıyoruz.
     """
     city = slugify_column(row.get("city", ""))
     district = slugify_column(row.get("district", ""))
@@ -118,8 +119,8 @@ def append_snapshot(df, source_name, resource_label):
     """
     Günlük snapshot kaydı oluşturur.
 
-    Streamlit her etkileşimde tekrar çalıştığı için aynı gün + aynı kaynak + aynı kayıt için
-    mükerrer veri oluşmasın diye eski satırı son veriyle değiştiriyoruz.
+    Streamlit her etkileşimde tekrar çalıştığı için aynı gün + aynı kaynak + aynı resource
+    + aynı kayıt için mükerrer satır oluşmasın diye eski satır son veriyle değiştirilir.
     """
     ensure_history_dir()
 
@@ -201,13 +202,12 @@ def build_history_summary(history_df):
             ),
             estimated_count=(
                 "is_estimated",
-                lambda s: (s.astype(str) == "True").sum(),
+                lambda s: (s.astype(str).str.lower() == "true").sum(),
             ),
         )
     )
 
     summary["avg_risk"] = summary["avg_risk"].round(1)
-
     summary = summary.sort_values("snapshot_date")
 
     return summary
@@ -281,13 +281,21 @@ def compare_snapshot_dates(history_df, start_date, end_date):
         new_col = f"{metric}_new"
         delta_col = f"{metric}_delta"
 
-        merged[delta_col] = merged[new_col].fillna(0) - merged[old_col].fillna(0)
+        merged[delta_col] = (
+            merged[new_col].fillna(0) - merged[old_col].fillna(0)
+        )
 
     def status(row):
-        if pd.isna(row.get("record_key_old")) and pd.notna(row.get("record_key_new")):
+        if pd.isna(row.get("record_key_old")) and pd.notna(
+            row.get("record_key_new")
+        ):
             return "Yeni kayıt"
-        if pd.notna(row.get("record_key_old")) and pd.isna(row.get("record_key_new")):
+
+        if pd.notna(row.get("record_key_old")) and pd.isna(
+            row.get("record_key_new")
+        ):
             return "Kayıt artık yok"
+
         return "Devam eden kayıt"
 
     merged["change_status"] = merged.apply(status, axis=1)
