@@ -16,6 +16,8 @@ COMMON_DEEP_QUERIES = [
     "hayvan bakimevi",
     "geçici hayvan bakımevi",
     "gecici hayvan bakimevi",
+    "geçici hayvan bakım merkezi",
+    "gecici hayvan bakim merkezi",
     "toplama merkezi",
     "hayvan toplama merkezi",
     "sokak hayvan",
@@ -47,8 +49,6 @@ CKAN_SOURCES = {
 }
 
 
-# Türkiye geneli tarama için bilinen/aday CKAN portalları.
-# Bazıları geçici olarak erişilemeyebilir; kod hata alınca o kaynağı atlar.
 TURKIYE_CKAN_SOURCES = {
     "İBB Açık Veri": {
         "base": "https://data.ibb.gov.tr",
@@ -140,12 +140,26 @@ def make_ckan_api_url(base_url):
     return f"{base}/api/3/action/package_search"
 
 
-def is_relevant_resource(resource):
+def classify_resource(resource):
     """
-    Türkiye geneli taramada çok alakasız dosya gelmesin diye basit uygunluk filtresi.
+    CKAN resource sınıflandırması.
+
+    shelter_facility:
+        Barınak, bakımevi, geçici hayvan bakım merkezi gibi envanter olma ihtimali yüksek kaynaklar.
+
+    operation_stats:
+        İşlem sayısı, istatistik, denetim, evcil hayvan varlığı gibi operasyonel/istatistiksel kaynaklar.
+
+    general_animal:
+        Hayvan/veteriner konulu ama barınak envanteri olduğu net olmayan kaynaklar.
+
+    irrelevant:
+        İlgisiz kaynaklar.
     """
+
     text = " ".join(
         [
+            str(resource.get("source_portal", "")),
             str(resource.get("package", "")),
             str(resource.get("name", "")),
             str(resource.get("package_notes", "")),
@@ -153,22 +167,98 @@ def is_relevant_resource(resource):
         ]
     ).lower()
 
-    positive_keywords = [
-        "hayvan",
+    shelter_keywords = [
+        "hayvan bakımevi",
+        "hayvan bakimevi",
+        "geçici hayvan bakım merkezi",
+        "gecici hayvan bakim merkezi",
+        "geçici hayvan bakımevi",
+        "gecici hayvan bakimevi",
+        "hayvan bakım merkezi",
+        "hayvan bakim merkezi",
+        "hayvan toplama merkezi",
+        "toplama merkezi",
+        "sahipsiz hayvan rehabilitasyon",
+        "rehabilitasyon merkezi",
         "barınak",
         "barinak",
         "bakımevi",
         "bakimevi",
-        "veteriner",
-        "kısır",
-        "kisir",
-        "sahipsiz",
-        "sokak",
-        "rehabilitasyon",
-        "toplama merkezi",
     ]
 
-    return any(k in text for k in positive_keywords)
+    operation_keywords = [
+        "işlem sayıları",
+        "islem sayilari",
+        "işlem_sayıları",
+        "islem_sayilari",
+        "işlemleri",
+        "islemleri",
+        "istatistik",
+        "istatistikleri",
+        "yıllara göre",
+        "yillara gore",
+        "denetim",
+        "hanelerde",
+        "evcil hayvan",
+        "evcil hayvan varlığı",
+        "evcil hayvan varligi",
+        "evcil hayvan türleri",
+        "evcil hayvan turleri",
+        "vektör",
+        "vektor",
+        "mücadele",
+        "mucadele",
+        "sağlık kurum",
+        "saglik kurum",
+        "kuruluşlarına ilişkin",
+        "kuruluslarina iliskin",
+        "vdym",
+        "sayısı",
+        "sayisi",
+    ]
+
+    general_animal_keywords = [
+        "hayvan",
+        "veteriner",
+        "sahipsiz",
+        "kısırlaştırma",
+        "kisirlastirma",
+        "rehabilitasyon",
+    ]
+
+    if any(k in text for k in shelter_keywords):
+        if any(k in text for k in operation_keywords):
+            return "operation_stats"
+        return "shelter_facility"
+
+    if any(k in text for k in operation_keywords):
+        return "operation_stats"
+
+    if any(k in text for k in general_animal_keywords):
+        return "general_animal"
+
+    return "irrelevant"
+
+
+def resource_relevance_score(resource):
+    category = classify_resource(resource)
+
+    score_map = {
+        "shelter_facility": 100,
+        "operation_stats": 45,
+        "general_animal": 25,
+        "irrelevant": 0,
+    }
+
+    return score_map.get(category, 0)
+
+
+def is_relevant_resource(resource):
+    return classify_resource(resource) in [
+        "shelter_facility",
+        "operation_stats",
+        "general_animal",
+    ]
 
 
 @st.cache_data(ttl=3600)
@@ -189,7 +279,6 @@ def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
 
     resources = []
     allowed_formats = {"csv", "xlsx", "xls", "json", "ods"}
-
     seen_urls = set()
 
     for q in queries:
@@ -247,6 +336,9 @@ def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
                     "matched_query": q,
                 }
 
+                item["resource_category"] = classify_resource(item)
+                item["relevance_score"] = resource_relevance_score(item)
+
                 resources.append(item)
 
     resources = [r for r in resources if is_relevant_resource(r)]
@@ -254,6 +346,7 @@ def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
     resources = sorted(
         resources,
         key=lambda r: (
+            int(r.get("relevance_score", 0)),
             str(r.get("resource_last_modified", "")),
             str(r.get("resource_revision_timestamp", "")),
             str(r.get("package_modified", "")),
@@ -286,15 +379,19 @@ def search_turkiye_ckan_resources(rows_per_query=50):
             seen_urls.add(url)
             r["source_portal"] = source_name
             r["source_base"] = source["base"]
+            r["resource_category"] = classify_resource(r)
+            r["relevance_score"] = resource_relevance_score(r)
             all_resources.append(r)
 
     all_resources = sorted(
         all_resources,
         key=lambda r: (
+            int(r.get("relevance_score", 0)),
             str(r.get("source_portal", "")),
             str(r.get("resource_last_modified", "")),
             str(r.get("package_modified", "")),
         ),
+        reverse=True,
     )
 
     return all_resources
@@ -375,11 +472,31 @@ def load_resource_with_metadata(resource):
     df["source_matched_query"] = resource.get("matched_query", "")
     df["source_package_modified"] = resource.get("package_modified", "")
     df["source_resource_last_modified"] = resource.get("resource_last_modified", "")
+    df["resource_category"] = resource.get("resource_category", "")
+    df["relevance_score"] = resource.get("relevance_score", 0)
 
     return df
 
 
-def load_multiple_resources(resources, max_resources=20):
+def load_multiple_resources(
+    resources,
+    max_resources=20,
+    allowed_categories=None,
+):
+    """
+    Çoklu resource yükler.
+
+    allowed_categories verilirse sadece o kategorideki kaynakları içeri alır.
+    Ana dashboard için önerilen:
+        allowed_categories=["shelter_facility"]
+    """
+
+    if allowed_categories is not None:
+        resources = [
+            r for r in resources
+            if r.get("resource_category") in allowed_categories
+        ]
+
     frames = []
     loaded_resources = []
     failed_resources = []
@@ -390,6 +507,9 @@ def load_multiple_resources(resources, max_resources=20):
         if df.empty:
             failed_resources.append(resource)
             continue
+
+        df["resource_category"] = resource.get("resource_category", "")
+        df["relevance_score"] = resource.get("relevance_score", 0)
 
         frames.append(df)
         loaded_resources.append(resource)
