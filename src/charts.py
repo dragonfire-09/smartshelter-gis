@@ -4,6 +4,7 @@ import plotly.express as px
 
 def empty_figure(title="Veri bulunamadı"):
     fig = px.scatter(title=title)
+
     fig.update_layout(
         xaxis={"visible": False},
         yaxis={"visible": False},
@@ -17,6 +18,7 @@ def empty_figure(title="Veri bulunamadı"):
             }
         ],
     )
+
     return fig
 
 
@@ -166,6 +168,127 @@ def chart_district_avg_risk(summary_df):
         xaxis_title="İlçe",
         yaxis_title="Ortalama Risk",
         coloraxis_colorbar_title="Risk",
+    )
+
+    fig.update_traces(textposition="outside")
+
+    return fig
+
+
+def chart_history_trend(summary_df):
+    if summary_df.empty:
+        return empty_figure("Tarihsel Trend")
+
+    long_df = summary_df.melt(
+        id_vars=["snapshot_date"],
+        value_vars=[
+            "record_count",
+            "total_capacity",
+            "total_occupancy",
+            "avg_risk",
+            "critical_count",
+        ],
+        var_name="metric",
+        value_name="value",
+    )
+
+    metric_names = {
+        "record_count": "Kayıt Sayısı",
+        "total_capacity": "Toplam Kapasite",
+        "total_occupancy": "Mevcut Hayvan",
+        "avg_risk": "Ortalama Risk",
+        "critical_count": "Kritik Kayıt",
+    }
+
+    long_df["metric_label"] = long_df["metric"].map(metric_names)
+
+    fig = px.line(
+        long_df,
+        x="snapshot_date",
+        y="value",
+        color="metric_label",
+        markers=True,
+        title="Tarihsel Göstergeler",
+    )
+
+    fig.update_layout(
+        xaxis_title="Tarih",
+        yaxis_title="Değer",
+        legend_title="Gösterge",
+    )
+
+    return fig
+
+
+def chart_history_metric(summary_df, metric):
+    if summary_df.empty or metric not in summary_df.columns:
+        return empty_figure("Tarihsel Metrik")
+
+    metric_titles = {
+        "record_count": "Kayıt Sayısı",
+        "total_capacity": "Toplam Kapasite",
+        "total_occupancy": "Mevcut Hayvan",
+        "avg_risk": "Ortalama Risk",
+        "critical_count": "Kritik Kayıt",
+        "estimated_count": "Tahmini Veri İçeren Kayıt",
+    }
+
+    fig = px.bar(
+        summary_df,
+        x="snapshot_date",
+        y=metric,
+        text=metric,
+        title=f"Tarihsel Değişim: {metric_titles.get(metric, metric)}",
+    )
+
+    fig.update_layout(
+        xaxis_title="Tarih",
+        yaxis_title=metric_titles.get(metric, metric),
+    )
+
+    fig.update_traces(textposition="outside")
+
+    return fig
+
+
+def chart_record_delta(compare_df, metric_delta="risk_score_delta"):
+    if compare_df.empty or metric_delta not in compare_df.columns:
+        return empty_figure("Merkez Bazlı Değişim")
+
+    title_map = {
+        "risk_score_delta": "Risk Skoru Değişimi",
+        "occupancy_delta": "Mevcut Hayvan Sayısı Değişimi",
+        "capacity_delta": "Kapasite Değişimi",
+        "occupancy_rate_delta": "Doluluk Oranı Değişimi",
+        "vet_count_delta": "Veteriner Sayısı Değişimi",
+    }
+
+    plot_df = compare_df.copy()
+    plot_df = plot_df.sort_values(metric_delta, ascending=False)
+
+    fig = px.bar(
+        plot_df,
+        x="name",
+        y=metric_delta,
+        color="change_status",
+        text=metric_delta,
+        title=title_map.get(metric_delta, metric_delta),
+        hover_data=[
+            "city",
+            "district",
+            "change_status",
+            "risk_score_old",
+            "risk_score_new",
+            "occupancy_old",
+            "occupancy_new",
+        ],
+    )
+
+    fig.update_layout(
+        xaxis_title="Merkez",
+        yaxis_title="Değişim",
+        xaxis_tickangle=-35,
+        legend_title="Durum",
     )
 
     fig.update_traces(textposition="outside")
