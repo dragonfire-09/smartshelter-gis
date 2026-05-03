@@ -1,182 +1,270 @@
-import streamlit as st
+from io import BytesIO
+
 import pandas as pd
-import requests
-import folium
-import plotly.express as px
+import streamlit as st
 from streamlit_folium import st_folium
+
+from src.charts import (
+    build_district_summary,
+    chart_district_avg_risk,
+    chart_occupancy_rate,
+    chart_risk_score,
+)
+from src.data_loader import (
+    CKAN_SOURCES,
+    LOCAL_FILE,
+    load_local_data,
+    load_resource,
+    search_ckan_resources,
+)
+from src.map import create_shelter_map
+from src.normalize import normalize_columns
+from src.risk import calculate_risk, create_action_recommendations
+
 
 st.set_page_config(
     page_title="SmartShelter GIS",
     page_icon="🐾",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-LOCAL_FILE = "data/kocaeli_shelters.csv"
 
-CKAN_SOURCES = {
-    "Kocaeli Açık Veri": {
-        "base": "https://veri.kocaeli.bel.tr",
-        "query": "hayvan toplama merkezi"
-    },
-    "Ordu Açık Veri": {
-        "base": "https://acikveri.ordu.bel.tr",
-        "query": "hayvan bakımevi"
-    },
-    "B40 İstanbul": {
-        "base": "https://opendata.b40cities.org",
-        "query": "hayvan bakımevi"
-    }
-}
+# ---------------------------------------------------------
+# UI Helpers
+# ---------------------------------------------------------
+def inject_css():
+    st.markdown(
+        """
+        <style>
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 2rem;
+        }
 
+        div[data-testid="metric-container"] {
+            background-color: #ffffff;
+            border: 1px solid #e5e7eb;
+            padding: 18px;
+            border-radius: 14px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
 
-@st.cache_data(ttl=3600)
-def load_local_data():
-    return pd.read_csv(LOCAL_FILE)
+        .small-note {
+            color: #6b7280;
+            font-size: 0.9rem;
+        }
 
+        .risk-low {
+            color: #15803d;
+            font-weight: 700;
+        }
 
-def safe_get_json(url, params=None, timeout=15):
-    r = requests.get(url, params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+        .risk-medium {
+            color: #b45309;
+            font-weight: 700;
+        }
 
+        .risk-critical {
+            color: #b91c1c;
+            font-weight: 700;
+        }
 
-@st.cache_data(ttl=3600)
-def search_ckan_resources(base_url, query):
-    search_url = f"{base_url}/api/3/action/package_search"
-    data = safe_get_json(search_url, params={"q": query, "rows": 10})
-    results = data.get("result", {}).get("results", [])
+        .info-card {
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 16px 18px;
+            margin-bottom: 12px;
+        }
 
-    resources = []
+        .warning-card {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            border-radius: 14px;
+            padding: 16px 18px;
+            margin-bottom: 12px;
+        }
 
-    for package in results:
-        for res in package.get("resources", []):
-            fmt = str(res.get("format", "")).lower()
-            url = res.get("url", "")
-            name = res.get("name", package.get("title", "Veri"))
-
-            if url and fmt in ["csv", "xlsx", "xls", "json", "ods"]:
-                resources.append({
-                    "package": package.get("title", ""),
-                    "name": name,
-                    "format": fmt,
-                    "url": url,
-                    "resource_id": res.get("id", "")
-                })
-
-    return resources
-
-
-@st.cache_data(ttl=3600)
-def load_resource(resource):
-    fmt = resource["format"]
-    url = resource["url"]
-
-    if fmt == "csv":
-        return pd.read_csv(url)
-
-    if fmt in ["xlsx", "xls"]:
-        return pd.read_excel(url)
-
-    if fmt == "ods":
-        return pd.read_excel(url, engine="odf")
-
-    if fmt == "json":
-        try:
-            return pd.read_json(url)
-        except Exception:
-            data = safe_get_json(url)
-            if isinstance(data, list):
-                return pd.DataFrame(data)
-            if isinstance(data, dict):
-                if "records" in data:
-                    return pd.DataFrame(data["records"])
-                if "result" in data and "records" in data["result"]:
-                    return pd.DataFrame(data["result"]["records"])
-                return pd.DataFrame([data])
-
-    return pd.DataFrame()
-
-
-def normalize_columns(df):
-    df = df.copy()
-    df.columns = [str(c).strip().lower() for c in df.columns]
-
-    rename_map = {}
-
-    for c in df.columns:
-        if c in ["adi", "ad", "tesis_adi", "merkez_adi", "barinak_adi", "bakimevi_adi"]:
-            rename_map[c] = "name"
-        elif c in ["ilce", "ilçe", "district"]:
-            rename_map[c] = "district"
-        elif c in ["il", "city"]:
-            rename_map[c] = "city"
-        elif c in ["enlem", "lat", "latitude", "y"]:
-            rename_map[c] = "lat"
-        elif c in ["boylam", "lon", "lng", "longitude", "x"]:
-            rename_map[c] = "lon"
-        elif "kapasite" in c:
-            rename_map[c] = "capacity"
-        elif "doluluk" in c or "mevcut" in c:
-            rename_map[c] = "occupancy"
-        elif "veteriner" in c:
-            rename_map[c] = "vet_count"
-        elif "kısır" in c or "kisir" in c:
-            rename_map[c] = "sterilization_count"
-        elif "sahip" in c:
-            rename_map[c] = "adoption_count"
-
-    df = df.rename(columns=rename_map)
-
-    defaults = {
-        "name": "Hayvan Bakımevi / Toplama Merkezi",
-        "city": "Belirtilmemiş",
-        "district": "Belirtilmemiş",
-        "lat": None,
-        "lon": None,
-        "capacity": 100,
-        "occupancy": 70,
-        "vet_count": 1,
-        "sterilization_count": 0,
-        "adoption_count": 0
-    }
-
-    for col, val in defaults.items():
-        if col not in df.columns:
-            df[col] = val
-
-    for col in ["lat", "lon", "capacity", "occupancy", "vet_count", "sterilization_count", "adoption_count"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["capacity"] = df["capacity"].fillna(100)
-    df["occupancy"] = df["occupancy"].fillna(70)
-    df["vet_count"] = df["vet_count"].fillna(1)
-    df["sterilization_count"] = df["sterilization_count"].fillna(0)
-    df["adoption_count"] = df["adoption_count"].fillna(0)
-
-    return df
-
-
-def calculate_risk(df):
-    df = df.copy()
-    df["occupancy_rate"] = (df["occupancy"] / df["capacity"].replace(0, 1) * 100).round(1)
-
-    df["risk_score"] = (
-        df["occupancy_rate"] * 0.60 +
-        (100 / (df["vet_count"] + 1)) * 0.25 +
-        ((df["capacity"] - df["adoption_count"]).clip(lower=0) / df["capacity"].replace(0, 1) * 15)
-    ).round(1)
-
-    df["risk_level"] = pd.cut(
-        df["risk_score"],
-        bins=[-1, 40, 70, 999],
-        labels=["Düşük", "Orta", "Kritik"]
+        .danger-card {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 14px;
+            padding: 16px 18px;
+            margin-bottom: 12px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    return df
+
+def to_excel_bytes(df: pd.DataFrame, district_summary: pd.DataFrame) -> bytes:
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Kayıtlar")
+        district_summary.to_excel(writer, index=False, sheet_name="İlçe Özeti")
+
+    return output.getvalue()
 
 
-st.title("🐾 SmartShelter GIS")
-st.caption("Gerçek veri entegrasyonu + fallback veri + GIS harita + dashboard + risk skoru")
+def render_header():
+    col_logo, col_title = st.columns([0.08, 0.92])
+
+    with col_logo:
+        st.markdown("## 🐾")
+
+    with col_title:
+        st.title("SmartShelter GIS")
+        st.caption(
+            "Hayvan bakımevleri için açık veri tabanlı GIS karar destek prototipi"
+        )
+
+
+def render_methodology_note():
+    st.info(
+        """
+        Bu uygulama resmi bir denetim sistemi değildir. Açık veri ve demo veriyle çalışan
+        prototip bir karar destek ekranıdır. Risk skoru; kapasite baskısı, veteriner yükü,
+        sahiplendirme açığı ve kısırlaştırma performansı gibi göstergelerden hesaplanan
+        örnek bir önceliklendirme skorudur.
+        """
+    )
+
+
+def render_kpis(df: pd.DataFrame):
+    total_records = len(df)
+    total_capacity = int(df["capacity"].sum()) if total_records else 0
+    total_occupancy = int(df["occupancy"].sum()) if total_records else 0
+    avg_risk = df["risk_score"].mean() if total_records else 0
+    critical_count = len(df[df["risk_level"].astype(str) == "Kritik"])
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    col1.metric("Toplam Kayıt", total_records)
+    col2.metric("Toplam Kapasite", total_capacity)
+    col3.metric("Mevcut Hayvan", total_occupancy)
+    col4.metric("Ortalama Risk", f"{avg_risk:.1f}" if total_records else "0")
+    col5.metric("Kritik Kayıt", critical_count)
+
+    if critical_count > 0:
+        st.error(f"🔴 {critical_count} kayıt kritik risk seviyesinde.")
+    else:
+        st.success("🟢 Kritik seviyede kayıt bulunmuyor.")
+
+
+def render_data_quality_summary(df: pd.DataFrame):
+    total = len(df)
+
+    if total == 0:
+        st.warning("Veri bulunamadı.")
+        return
+
+    coord_missing = len(df[df["coordinate_valid"] == False])  # noqa: E712
+    estimated = len(df[df["is_estimated"] == True])  # noqa: E712
+    capacity_estimated = len(df[df["capacity_estimated"] == True])  # noqa: E712
+    occupancy_estimated = len(df[df["occupancy_estimated"] == True])  # noqa: E712
+    vet_estimated = len(df[df["vet_count_estimated"] == True])  # noqa: E712
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    c1.metric("Toplam Kayıt", total)
+    c2.metric("Geçersiz Koordinat", coord_missing)
+    c3.metric("Tahmini Alan İçeren", estimated)
+    c4.metric("Kapasite Tahmini", capacity_estimated)
+    c5.metric("Veteriner Tahmini", vet_estimated)
+
+    if estimated > 0:
+        st.warning(
+            "Bazı kayıtlarda eksik alanlar demo/prototip amacıyla tahmini değerlerle tamamlanmıştır."
+        )
+    else:
+        st.success("Tahmini değer kullanılan kayıt bulunmuyor.")
+
+
+def render_record_detail(df: pd.DataFrame):
+    st.subheader("🏥 Kayıt Detayı")
+
+    if len(df) == 0:
+        st.warning("Filtreye uygun kayıt bulunamadı.")
+        return
+
+    names = df["name"].astype(str).tolist()
+
+    selected_name = st.selectbox(
+        "Kayıt seç",
+        names,
+        key="record_detail_select",
+    )
+
+    item = df[df["name"].astype(str) == selected_name].iloc[0]
+
+    st.write(f"**İl:** {item['city']}")
+    st.write(f"**İlçe:** {item['district']}")
+    st.write(f"**Kapasite:** {int(item['capacity'])}")
+    st.write(f"**Mevcut Hayvan:** {int(item['occupancy'])}")
+    st.write(f"**Doluluk Oranı:** %{item['occupancy_rate']}")
+    st.write(f"**Veteriner Sayısı:** {int(item['vet_count'])}")
+    st.write(f"**Veteriner Başına Hayvan:** {item['animals_per_vet']:.1f}")
+    st.write(f"**Kısırlaştırma:** {int(item['sterilization_count'])}")
+    st.write(f"**Sahiplendirme:** {int(item['adoption_count'])}")
+    st.write(f"**Risk Skoru:** {item['risk_score']}")
+
+    risk_level = str(item["risk_level"])
+
+    if risk_level == "Kritik":
+        st.error("🔴 Kritik risk seviyesi")
+    elif risk_level == "Orta":
+        st.warning("🟠 Orta risk seviyesi")
+    else:
+        st.success("🟢 Düşük risk seviyesi")
+
+    st.markdown("#### Önerilen Aksiyon")
+    st.write(item["recommended_action"])
+
+    if item.get("is_estimated", False):
+        st.markdown("#### Veri Kalitesi Notu")
+        st.warning(item.get("data_quality_note", "Bazı alanlar tahmini olabilir."))
+
+
+def render_report_downloads(df: pd.DataFrame, district_summary: pd.DataFrame):
+    st.subheader("📥 Rapor İndirme")
+
+    if len(df) == 0:
+        st.warning("İndirilecek kayıt bulunamadı.")
+        return
+
+    csv_data = df.to_csv(index=False).encode("utf-8-sig")
+
+    st.download_button(
+        label="CSV Rapor İndir",
+        data=csv_data,
+        file_name="smartshelter_filtered_report.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    excel_data = to_excel_bytes(df, district_summary)
+
+    st.download_button(
+        label="Excel Rapor İndir",
+        data=excel_data,
+        file_name="smartshelter_report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    st.caption(
+        "Excel raporunda iki sayfa bulunur: kayıtlar ve ilçe bazlı özet."
+    )
+
+
+# ---------------------------------------------------------
+# Main App
+# ---------------------------------------------------------
+inject_css()
+render_header()
 
 st.sidebar.header("Veri Kaynağı")
 
@@ -184,209 +272,271 @@ mode = st.sidebar.radio(
     "Veri modu",
     [
         "Stabil Demo CSV",
-        "Canlı CKAN API Dene"
-    ]
+        "Canlı CKAN API Dene",
+    ],
 )
 
-df = pd.DataFrame()
+raw_df = pd.DataFrame()
+selected_source_name = "Stabil Demo CSV"
+selected_resource_label = "-"
 
 if mode == "Stabil Demo CSV":
-    df = load_local_data()
-    st.success("Stabil GitHub CSV verisi kullanılıyor.")
+    try:
+        raw_df = load_local_data(LOCAL_FILE)
+        st.success("Stabil demo CSV verisi kullanılıyor.")
+    except Exception as e:
+        st.error("Lokal CSV dosyası okunamadı.")
+        st.exception(e)
+        st.stop()
 
 else:
-    selected_source = st.sidebar.selectbox(
+    selected_source_name = st.sidebar.selectbox(
         "Canlı kaynak seç",
-        list(CKAN_SOURCES.keys())
+        list(CKAN_SOURCES.keys()),
     )
 
-    source = CKAN_SOURCES[selected_source]
+    source = CKAN_SOURCES[selected_source_name]
 
     try:
-        resources = search_ckan_resources(source["base"], source["query"])
+        resources = search_ckan_resources(
+            source["base"],
+            source["query"],
+        )
 
         if not resources:
-            st.warning("Bu kaynakta uygun CSV/XLSX/JSON/ODS resource bulunamadı. Lokal veri kullanılıyor.")
-            df = load_local_data()
+            st.warning(
+                "Bu kaynakta uygun CSV/XLSX/JSON/ODS resource bulunamadı. Lokal veri kullanılıyor."
+            )
+            raw_df = load_local_data(LOCAL_FILE)
+            selected_source_name = "Fallback Demo CSV"
         else:
             resource_labels = [
                 f"{r['package']} | {r['name']} | {r['format'].upper()}"
                 for r in resources
             ]
 
-            selected_label = st.sidebar.selectbox("Resource seç", resource_labels)
-            selected_resource = resources[resource_labels.index(selected_label)]
+            selected_resource_label = st.sidebar.selectbox(
+                "Resource seç",
+                resource_labels,
+            )
 
-            df = load_resource(selected_resource)
+            selected_resource = resources[
+                resource_labels.index(selected_resource_label)
+            ]
 
-            st.success(f"Canlı veri kaynağı yüklendi: {selected_source}")
-            st.caption(selected_label)
+            raw_df = load_resource(selected_resource)
+
+            if raw_df.empty:
+                st.warning(
+                    "Seçilen canlı kaynak boş döndü. Lokal demo veri kullanılıyor."
+                )
+                raw_df = load_local_data(LOCAL_FILE)
+                selected_source_name = "Fallback Demo CSV"
+            else:
+                st.success(f"Canlı veri kaynağı yüklendi: {selected_source_name}")
+                st.caption(selected_resource_label)
 
     except Exception as e:
         st.warning("Canlı veri çekilemedi. Lokal stabil veri kullanılıyor.")
         st.error(str(e))
-        df = load_local_data()
+        raw_df = load_local_data(LOCAL_FILE)
+        selected_source_name = "Fallback Demo CSV"
 
 
-df = normalize_columns(df)
+df = normalize_columns(raw_df)
 df = calculate_risk(df)
+df = create_action_recommendations(df)
 
 st.sidebar.header("Filtreler")
 
 districts = sorted(df["district"].dropna().astype(str).unique().tolist())
+cities = sorted(df["city"].dropna().astype(str).unique().tolist())
 risk_levels = ["Düşük", "Orta", "Kritik"]
+
+selected_cities = st.sidebar.multiselect(
+    "İl seç",
+    cities,
+    default=cities,
+)
 
 selected_districts = st.sidebar.multiselect(
     "İlçe seç",
     districts,
-    default=districts
+    default=districts,
 )
 
 selected_risks = st.sidebar.multiselect(
     "Risk seviyesi",
     risk_levels,
-    default=risk_levels
+    default=risk_levels,
+)
+
+show_only_valid_coordinates = st.sidebar.checkbox(
+    "Sadece koordinatı geçerli kayıtlar",
+    value=False,
 )
 
 filtered_df = df[
-    (df["district"].astype(str).isin(selected_districts)) &
-    (df["risk_level"].astype(str).isin(selected_risks))
-]
+    (df["city"].astype(str).isin(selected_cities))
+    & (df["district"].astype(str).isin(selected_districts))
+    & (df["risk_level"].astype(str).isin(selected_risks))
+].copy()
 
-col1, col2, col3, col4 = st.columns(4)
+if show_only_valid_coordinates:
+    filtered_df = filtered_df[filtered_df["coordinate_valid"] == True].copy()  # noqa: E712
 
-col1.metric("Toplam Merkez / Kayıt", len(filtered_df))
-col2.metric("Toplam Kapasite", int(filtered_df["capacity"].sum()))
-col3.metric("Mevcut Hayvan", int(filtered_df["occupancy"].sum()))
-col4.metric(
-    "Ortalama Risk",
-    f"{filtered_df['risk_score'].mean():.1f}" if len(filtered_df) else "0"
-)
+district_summary = build_district_summary(filtered_df)
 
-critical_count = len(filtered_df[filtered_df["risk_level"].astype(str) == "Kritik"])
+with st.expander("ℹ️ Prototip Bilgisi", expanded=False):
+    render_methodology_note()
+    st.write(f"**Aktif veri kaynağı:** {selected_source_name}")
+    st.write(f"**Resource:** {selected_resource_label}")
 
-if critical_count > 0:
-    st.error(f"🔴 {critical_count} kayıt kritik risk seviyesinde.")
-else:
-    st.success("🟢 Kritik seviyede kayıt bulunmuyor.")
+render_kpis(filtered_df)
 
 st.divider()
 
-left, right = st.columns([2, 1])
+left, right = st.columns([2.2, 1])
 
 with left:
     st.subheader("📍 GIS Haritası")
 
-    map_df = filtered_df.dropna(subset=["lat", "lon"])
+    map_df = filtered_df[filtered_df["coordinate_valid"] == True].copy()  # noqa: E712
 
     if len(map_df) == 0:
-        st.warning("Bu veri kaynağında koordinat bulunamadı. Harita için lat/lon gerekli.")
+        st.warning("Harita için geçerli koordinata sahip kayıt bulunamadı.")
     else:
-        m = folium.Map(
-            location=[map_df["lat"].mean(), map_df["lon"].mean()],
-            zoom_start=10,
-            tiles="OpenStreetMap"
+        shelter_map = create_shelter_map(map_df)
+        st_folium(
+            shelter_map,
+            width=1100,
+            height=620,
+            returned_objects=[],
         )
-
-        for _, row in map_df.iterrows():
-            color = "green"
-            if row["risk_level"] == "Orta":
-                color = "orange"
-            elif row["risk_level"] == "Kritik":
-                color = "red"
-
-            popup = f"""
-            <b>{row['name']}</b><br>
-            İl: {row['city']}<br>
-            İlçe: {row['district']}<br>
-            Kapasite: {row['capacity']}<br>
-            Mevcut: {row['occupancy']}<br>
-            Doluluk: %{row['occupancy_rate']}<br>
-            Veteriner: {row['vet_count']}<br>
-            Kısırlaştırma: {row['sterilization_count']}<br>
-            Sahiplendirme: {row['adoption_count']}<br>
-            Risk: {row['risk_score']} - {row['risk_level']}
-            """
-
-            folium.Marker(
-                location=[row["lat"], row["lon"]],
-                popup=folium.Popup(popup, max_width=350),
-                tooltip=str(row["name"]),
-                icon=folium.Icon(color=color, icon="info-sign")
-            ).add_to(m)
-
-        st_folium(m, width=900, height=550)
 
 with right:
-    st.subheader("🏥 Kayıt Detayı")
-
-    if len(filtered_df) > 0:
-        selected_name = st.selectbox(
-            "Kayıt seç",
-            filtered_df["name"].astype(str).tolist()
-        )
-
-        item = filtered_df[filtered_df["name"].astype(str) == selected_name].iloc[0]
-
-        st.write(f"**İl:** {item['city']}")
-        st.write(f"**İlçe:** {item['district']}")
-        st.write(f"**Kapasite:** {int(item['capacity'])}")
-        st.write(f"**Mevcut Hayvan:** {int(item['occupancy'])}")
-        st.write(f"**Doluluk Oranı:** %{item['occupancy_rate']}")
-        st.write(f"**Veteriner Sayısı:** {int(item['vet_count'])}")
-        st.write(f"**Kısırlaştırma:** {int(item['sterilization_count'])}")
-        st.write(f"**Sahiplendirme:** {int(item['adoption_count'])}")
-        st.write(f"**Risk Skoru:** {item['risk_score']}")
-
-        if item["risk_level"] == "Kritik":
-            st.error("🔴 Kritik risk seviyesi")
-        elif item["risk_level"] == "Orta":
-            st.warning("🟠 Orta risk seviyesi")
-        else:
-            st.success("🟢 Düşük risk seviyesi")
+    render_record_detail(filtered_df)
 
 st.divider()
 
 st.subheader("📊 Dashboard")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Risk Skoru", "Doluluk", "Ham Veri", "Proje Vizyonu"]
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+    [
+        "Risk Skoru",
+        "Doluluk",
+        "İlçe Özeti",
+        "Veri Kalitesi",
+        "Ham Veri",
+        "Rapor",
+        "Proje Vizyonu",
+    ]
 )
 
 with tab1:
-    fig = px.bar(
-        filtered_df,
-        x="name",
-        y="risk_score",
-        color="risk_level",
-        text="risk_score",
-        title="Risk Skoru"
+    st.plotly_chart(
+        chart_risk_score(filtered_df),
+        use_container_width=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### Operasyonel Öncelik Listesi")
+    priority_cols = [
+        "name",
+        "city",
+        "district",
+        "risk_level",
+        "risk_score",
+        "occupancy_rate",
+        "animals_per_vet",
+        "recommended_action",
+    ]
+
+    st.dataframe(
+        filtered_df.sort_values("risk_score", ascending=False)[priority_cols],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 with tab2:
-    fig2 = px.bar(
-        filtered_df,
-        x="name",
-        y="occupancy_rate",
-        color="district",
-        text="occupancy_rate",
-        title="Doluluk Oranı (%)"
+    st.plotly_chart(
+        chart_occupancy_rate(filtered_df),
+        use_container_width=True,
     )
-    st.plotly_chart(fig2, use_container_width=True)
 
 with tab3:
-    st.dataframe(filtered_df, use_container_width=True)
+    st.plotly_chart(
+        chart_district_avg_risk(district_summary),
+        use_container_width=True,
+    )
+
+    st.dataframe(
+        district_summary,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 with tab4:
-    st.markdown("""
-    ### 🌍 SmartShelter GIS Vizyonu
+    render_data_quality_summary(filtered_df)
 
-    Bu platform, belediyelerin açık veri kaynaklarını kullanarak hayvan barınakları ve sokak hayvanları yönetimini
-    daha şeffaf, ölçülebilir ve veri odaklı hale getirmeyi amaçlar.
+    quality_cols = [
+        "name",
+        "city",
+        "district",
+        "coordinate_valid",
+        "is_estimated",
+        "capacity_estimated",
+        "occupancy_estimated",
+        "vet_count_estimated",
+        "data_quality_note",
+    ]
 
-    Sistem; GIS haritalama, açık veri entegrasyonu, risk skorlama ve karar destek mekanizmalarını birleştirerek
-    belediyeler, bakanlıklar, STK’lar ve vatandaşlar arasında daha etkili bir koordinasyon modeli sunar.
-    """)
+    st.markdown("#### Veri Kalitesi Detayı")
+    st.dataframe(
+        filtered_df[quality_cols],
+        use_container_width=True,
+        hide_index=True,
+    )
 
-st.info("Canlı API erişimi başarısız olursa sistem otomatik olarak GitHub içindeki stabil CSV verisine döner.")
+with tab5:
+    st.dataframe(
+        filtered_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+with tab6:
+    render_report_downloads(filtered_df, district_summary)
+
+with tab7:
+    st.markdown(
+        """
+        ### 🌍 SmartShelter GIS Vizyonu
+
+        SmartShelter GIS; belediyeler, Tarım ve Orman Bakanlığı, STK'lar ve yerel yönetimler arasında
+        ortak bir veri dili oluşturmayı hedefleyen açık veri tabanlı bir karar destek prototipidir.
+
+        #### Temel amaçlar
+
+        - Hayvan bakımevleri ve toplama merkezlerini harita üzerinde izlemek
+        - Kapasite ve doluluk baskısını görünür hale getirmek
+        - Veteriner iş yükünü ölçülebilir hale getirmek
+        - Kısırlaştırma ve sahiplendirme performansını takip etmek
+        - Kritik merkezleri önceliklendirmek
+        - İl/ilçe bazlı operasyonel planlamaya destek olmak
+
+        #### Önerilen sonraki aşamalar
+
+        1. Ulusal veri standardı oluşturulması  
+        2. Belediye sistemleriyle API entegrasyonu  
+        3. PostGIS tabanlı merkezi coğrafi veri altyapısı  
+        4. Mobil saha veri girişi  
+        5. Gerçek zamanlı kapasite ve vaka takibi  
+        6. Bakanlık düzeyinde izleme ve raporlama ekranı  
+
+        > Not: Bu uygulama resmi bir sistem değil, karar destek amaçlı çalışan prototip bir yazılımdır.
+        """
+    )
+
+st.info(
+    "Canlı API erişimi başarısız olursa sistem otomatik olarak lokal stabil CSV verisine döner."
+)
