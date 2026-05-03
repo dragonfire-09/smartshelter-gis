@@ -50,22 +50,19 @@ st.set_page_config(
 )
 
 
-# ---------------------------------------------------------
-# UI Helpers
-# ---------------------------------------------------------
 def inject_css():
     st.markdown(
         """
         <style>
         .main .block-container {
-            padding-top: 1.5rem;
+            padding-top: 1.4rem;
             padding-bottom: 2rem;
         }
 
         div[data-testid="metric-container"] {
             background-color: #ffffff;
             border: 1px solid #e5e7eb;
-            padding: 18px;
+            padding: 17px;
             border-radius: 14px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.04);
         }
@@ -73,30 +70,6 @@ def inject_css():
         .small-note {
             color: #6b7280;
             font-size: 0.9rem;
-        }
-
-        .info-card {
-            background: #f8fafc;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-            padding: 16px 18px;
-            margin-bottom: 12px;
-        }
-
-        .warning-card {
-            background: #fff7ed;
-            border: 1px solid #fed7aa;
-            border-radius: 14px;
-            padding: 16px 18px;
-            margin-bottom: 12px;
-        }
-
-        .danger-card {
-            background: #fef2f2;
-            border: 1px solid #fecaca;
-            border-radius: 14px;
-            padding: 16px 18px;
-            margin-bottom: 12px;
         }
         </style>
         """,
@@ -133,18 +106,12 @@ def render_methodology_note():
         Bu uygulama resmi bir denetim sistemi değildir. Açık veri ve demo veriyle çalışan
         prototip bir karar destek ekranıdır.
 
-        Risk skoru; kapasite baskısı, veteriner yükü, sahiplendirme açığı ve
-        kısırlaştırma performansı gibi göstergelerden hesaplanan örnek bir
-        önceliklendirme skorudur.
+        Türkiye geneli tarama modunda sistem yalnızca barınak/bakımevi envanteri olabilecek
+        kaynakları ana risk dashboard'una almaya çalışır. İşlem sayısı, denetim istatistiği,
+        evcil hayvan varlığı veya genel veteriner verileri ana kapasite/doluluk metriklerine
+        karıştırılmaz.
 
         AI Analiz bölümü harici AI API kullanmadan, şeffaf ve kural tabanlı çalışır.
-        Sistem yönetici özeti, risk açıklaması, veri kalite skoru, anomali tespiti
-        ve senaryo simülasyonu üretir.
-
-        Geçmiş analitik modülü, uygulamanın çektiği verileri günlük snapshot olarak saklar.
-        Kaynak sistem eski tarihli resource yayınlıyorsa derin CKAN taramasıyla listelenebilir.
-        Kaynak yalnızca güncel dosya yayınlıyorsa, uygulama bundan sonraki her çekimi kendi
-        tarihsel arşivine ekler.
         """
     )
 
@@ -158,7 +125,7 @@ def render_kpis(df: pd.DataFrame):
 
     col1, col2, col3, col4, col5 = st.columns(5)
 
-    col1.metric("Toplam Kayıt", total_records)
+    col1.metric("Analitik Kayıt", total_records)
     col2.metric("Toplam Kapasite", total_capacity)
     col3.metric("Mevcut Hayvan", total_occupancy)
     col4.metric("Ortalama Risk", f"{avg_risk:.1f}" if total_records else "0")
@@ -185,7 +152,7 @@ def render_data_quality_summary(df: pd.DataFrame):
 
     c1, c2, c3, c4, c5 = st.columns(5)
 
-    c1.metric("Toplam Kayıt", total)
+    c1.metric("Analitik Kayıt", total)
     c2.metric("Geçersiz Koordinat", coord_missing)
     c3.metric("Tahmini Alan İçeren", estimated)
     c4.metric("Kapasite Tahmini", capacity_estimated)
@@ -263,93 +230,8 @@ def render_record_detail(df: pd.DataFrame):
         st.warning(quality_note)
 
 
-def render_report_downloads(
-    df: pd.DataFrame,
-    district_summary: pd.DataFrame,
-    history_df: pd.DataFrame,
-    history_summary_df: pd.DataFrame,
-    anomalies_df: pd.DataFrame,
-):
-    st.subheader("📥 Güncel Rapor İndirme")
-
-    if len(df) == 0:
-        st.warning("İndirilecek güncel kayıt bulunamadı.")
-    else:
-        csv_data = df.to_csv(index=False).encode("utf-8-sig")
-
-        st.download_button(
-            label="Güncel Filtrelenmiş CSV Rapor İndir",
-            data=csv_data,
-            file_name="smartshelter_filtered_report.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        excel_data = to_excel_bytes(df, district_summary)
-
-        st.download_button(
-            label="Güncel Excel Rapor İndir",
-            data=excel_data,
-            file_name="smartshelter_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-
-    st.markdown("---")
-    st.subheader("🤖 AI Analiz Raporları")
-
-    if anomalies_df is not None and not anomalies_df.empty:
-        anomalies_csv = anomalies_df.to_csv(index=False).encode("utf-8-sig")
-
-        st.download_button(
-            label="AI Anomali Raporu CSV İndir",
-            data=anomalies_csv,
-            file_name="smartshelter_ai_anomalies.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    else:
-        st.info("İndirilecek anomali raporu bulunmuyor.")
-
-    st.markdown("---")
-    st.subheader("🕒 Tarihsel Veri İndirme")
-
-    if history_df.empty:
-        st.warning("Tarihsel snapshot verisi bulunmuyor.")
-    else:
-        history_csv = history_df.to_csv(index=False).encode("utf-8-sig")
-
-        st.download_button(
-            label="Tüm Tarihsel Snapshot Verisini CSV İndir",
-            data=history_csv,
-            file_name="smartshelter_history_snapshots.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        history_summary_csv = history_summary_df.to_csv(index=False).encode(
-            "utf-8-sig"
-        )
-
-        st.download_button(
-            label="Tarihsel Özet CSV İndir",
-            data=history_summary_csv,
-            file_name="smartshelter_history_summary.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-
 def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.DataFrame):
     st.subheader("🕒 Geçmiş Analitik ve Tarihsel Karşılaştırma")
-
-    st.markdown(
-        """
-        Bu bölüm, uygulamanın daha önce çektiği verileri günlük snapshot olarak saklar.
-        Böylece zaman içinde kapasite, mevcut hayvan sayısı, risk skoru ve kritik kayıt sayısı
-        karşılaştırılabilir.
-        """
-    )
 
     available_dates = get_available_snapshot_dates(history_df)
 
@@ -363,10 +245,7 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
             "Karşılaştırma için farklı günlerde tekrar veri çekilmesi gerekir."
         )
 
-        st.plotly_chart(
-            chart_history_trend(history_summary_df),
-            use_container_width=True,
-        )
+        st.plotly_chart(chart_history_trend(history_summary_df), use_container_width=True)
 
         st.dataframe(
             history_summary_df,
@@ -412,11 +291,6 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
             }.get(x, x),
         )
 
-    if start_date == end_date:
-        st.warning(
-            "Başlangıç ve bitiş tarihi aynı seçildi. Değişim analizi için farklı iki tarih seç."
-        )
-
     summary_compare = compare_summary(
         history_summary_df,
         start_date,
@@ -456,21 +330,13 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
             int(summary_compare["critical_count"]["delta"]),
         )
 
-    st.plotly_chart(
-        chart_history_trend(history_summary_df),
-        use_container_width=True,
-    )
-
+    st.plotly_chart(chart_history_trend(history_summary_df), use_container_width=True)
     st.plotly_chart(
         chart_history_metric(history_summary_df, selected_history_metric),
         use_container_width=True,
     )
 
-    compare_df = compare_snapshot_dates(
-        history_df,
-        start_date,
-        end_date,
-    )
+    compare_df = compare_snapshot_dates(history_df, start_date, end_date)
 
     st.markdown("#### Merkez Bazlı Değişim")
 
@@ -495,16 +361,9 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
             }.get(x, x),
         )
 
-        st.plotly_chart(
-            chart_record_delta(compare_df, delta_metric),
-            use_container_width=True,
-        )
+        st.plotly_chart(chart_record_delta(compare_df, delta_metric), use_container_width=True)
 
-        st.dataframe(
-            compare_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(compare_df, use_container_width=True, hide_index=True)
 
         csv_history_compare = compare_df.to_csv(index=False).encode("utf-8-sig")
 
@@ -516,14 +375,6 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
             use_container_width=True,
         )
 
-    st.markdown("#### Tüm Snapshot Özetleri")
-
-    st.dataframe(
-        history_summary_df,
-        use_container_width=True,
-        hide_index=True,
-    )
-
 
 def render_ai_analysis(
     filtered_df: pd.DataFrame,
@@ -532,12 +383,8 @@ def render_ai_analysis(
 ):
     st.subheader("🤖 AI Analiz ve Karar Destek")
 
-    st.markdown(
-        """
-        Bu bölüm harici AI API kullanmadan, kural tabanlı akıllı analiz üretir.
-        Amaç; yöneticilere hızlı özet, risk açıklaması, anomali tespiti,
-        veri kalite puanı ve müdahale senaryosu sağlamaktır.
-        """
+    st.caption(
+        "Bu bölüm harici AI API kullanmadan, kural tabanlı yönetici özeti, anomali tespiti ve senaryo analizi üretir."
     )
 
     ai_summary = generate_executive_summary(
@@ -569,11 +416,7 @@ def render_ai_analysis(
         a2.metric("Yüksek Uyarı", high_anomaly_count)
         a3.metric("Kritik Uyarı", critical_anomaly_count)
 
-        st.dataframe(
-            anomalies_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(anomalies_df, use_container_width=True, hide_index=True)
 
     st.divider()
 
@@ -616,28 +459,17 @@ def render_ai_analysis(
             "data_quality_note",
         ]
 
-        quality_view_cols = [
-            c for c in quality_view_cols if c in filtered_df.columns
-        ]
+        quality_view_cols = [c for c in quality_view_cols if c in filtered_df.columns]
 
         st.dataframe(
             filtered_df.sort_values("data_quality_score")[quality_view_cols],
             use_container_width=True,
             hide_index=True,
         )
-    else:
-        st.warning("Veri kalitesi skoru üretilemedi.")
 
     st.divider()
 
     st.subheader("🧪 Senaryo Simülasyonu")
-
-    st.markdown(
-        """
-        Bu bölümde kapasite, veteriner, sahiplendirme ve kısırlaştırma müdahalelerinin
-        risk skoruna tahmini etkisi hesaplanır.
-        """
-    )
 
     s1, s2, s3, s4 = st.columns(4)
 
@@ -698,11 +530,7 @@ def render_ai_analysis(
         c2.metric("Senaryo Ortalama Risk", f"{avg_scenario_risk:.1f}")
         c3.metric("Ortalama İyileşme", f"{avg_improvement:.1f}")
 
-        st.dataframe(
-            scenario_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(scenario_df, use_container_width=True, hide_index=True)
 
         scenario_csv = scenario_df.to_csv(index=False).encode("utf-8-sig")
 
@@ -715,8 +543,171 @@ def render_ai_analysis(
         )
 
 
+def render_source_management(
+    candidate_resources_df: pd.DataFrame,
+    loaded_resources_info: pd.DataFrame,
+    excluded_df: pd.DataFrame,
+    df_all_loaded: pd.DataFrame,
+):
+    st.subheader("🧩 Kaynak Yönetimi ve Veri Ayrıştırma")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("Aday Resource", len(candidate_resources_df))
+    c2.metric("İçeri Alınan Resource", len(loaded_resources_info))
+    c3.metric("Yüklenen Satır", len(df_all_loaded))
+    c4.metric("Ana Analitikten Dışlanan", len(excluded_df))
+
+    st.markdown("#### Resource Kategori Dağılımı")
+
+    if not candidate_resources_df.empty and "resource_category" in candidate_resources_df.columns:
+        category_summary = (
+            candidate_resources_df.groupby("resource_category", as_index=False)
+            .agg(
+                resource_count=("name", "count"),
+                avg_relevance=("relevance_score", "mean"),
+            )
+            .sort_values("resource_count", ascending=False)
+        )
+
+        category_summary["avg_relevance"] = category_summary["avg_relevance"].round(1)
+
+        st.dataframe(category_summary, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("Resource aday bilgisi yok.")
+
+    st.markdown("#### İçeri Alınan Resource Listesi")
+
+    if loaded_resources_info.empty:
+        st.info("İçeri alınan resource listesi yok.")
+    else:
+        display_cols = [
+            "source_portal",
+            "resource_category",
+            "relevance_score",
+            "package",
+            "name",
+            "format",
+            "matched_query",
+            "url",
+        ]
+
+        display_cols = [c for c in display_cols if c in loaded_resources_info.columns]
+
+        st.dataframe(
+            loaded_resources_info[display_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("#### Ana Analitikten Dışlanan Kayıtlar")
+
+    if excluded_df.empty:
+        st.success("Ana analitikten dışlanan kayıt yok.")
+    else:
+        display_cols = [
+            "name",
+            "city",
+            "district",
+            "source_portal",
+            "source_resource",
+            "resource_category",
+            "analytics_exclusion_reason",
+        ]
+
+        display_cols = [c for c in display_cols if c in excluded_df.columns]
+
+        st.warning(
+            "Bu kayıtlar yüklendi ancak ana kapasite/doluluk/risk analitiğine uygun olmadığı için dışlandı."
+        )
+
+        st.dataframe(
+            excluded_df[display_cols].head(500),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def render_report_downloads(
+    df: pd.DataFrame,
+    district_summary: pd.DataFrame,
+    history_df: pd.DataFrame,
+    history_summary_df: pd.DataFrame,
+    anomalies_df: pd.DataFrame,
+    excluded_df: pd.DataFrame,
+):
+    st.subheader("📥 Rapor İndirme")
+
+    if len(df) == 0:
+        st.warning("İndirilecek güncel kayıt bulunamadı.")
+    else:
+        csv_data = df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            label="Güncel Filtrelenmiş CSV Rapor İndir",
+            data=csv_data,
+            file_name="smartshelter_filtered_report.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        excel_data = to_excel_bytes(df, district_summary)
+
+        st.download_button(
+            label="Güncel Excel Rapor İndir",
+            data=excel_data,
+            file_name="smartshelter_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    if anomalies_df is not None and not anomalies_df.empty:
+        anomalies_csv = anomalies_df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            label="AI Anomali Raporu CSV İndir",
+            data=anomalies_csv,
+            file_name="smartshelter_ai_anomalies.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    if excluded_df is not None and not excluded_df.empty:
+        excluded_csv = excluded_df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            label="Dışlanan Kayıtlar CSV İndir",
+            data=excluded_csv,
+            file_name="smartshelter_excluded_records.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    if history_df is not None and not history_df.empty:
+        history_csv = history_df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            label="Tüm Tarihsel Snapshot Verisini CSV İndir",
+            data=history_csv,
+            file_name="smartshelter_history_snapshots.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        history_summary_csv = history_summary_df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            label="Tarihsel Özet CSV İndir",
+            data=history_summary_csv,
+            file_name="smartshelter_history_summary.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
 # ---------------------------------------------------------
-# Main App
+# Main
 # ---------------------------------------------------------
 inject_css()
 render_header()
@@ -737,11 +728,12 @@ selected_source_name = "Stabil Demo CSV"
 selected_resource_label = "Lokal CSV"
 deep_scan = False
 loaded_resources_info = pd.DataFrame()
+candidate_resources_df = pd.DataFrame()
 failed_resource_count = 0
 
 
 # ---------------------------------------------------------
-# Data Loading Modes
+# Data Loading
 # ---------------------------------------------------------
 if mode == "Stabil Demo CSV":
     try:
@@ -766,10 +758,6 @@ elif mode == "Canlı CKAN API Dene":
     deep_scan = st.sidebar.checkbox(
         "Derin geçmiş kaynak taraması",
         value=True,
-        help=(
-            "Daha fazla anahtar kelimeyle eski CKAN resource kayıtlarını da arar. "
-            "Bu seçenek eski CSV/XLSX/JSON/ODS kaynaklarını bulma ihtimalini artırır."
-        ),
     )
 
     try:
@@ -780,9 +768,11 @@ elif mode == "Canlı CKAN API Dene":
             deep_queries=source.get("deep_queries", []) if deep_scan else None,
         )
 
+        candidate_resources_df = pd.DataFrame(resources)
+
         if not resources:
             st.warning(
-                "Bu kaynakta uygun CSV/XLSX/JSON/ODS resource bulunamadı. Lokal veri kullanılıyor."
+                "Bu kaynakta uygun resource bulunamadı. Lokal veri kullanılıyor."
             )
             raw_df = load_local_data(LOCAL_FILE)
             selected_source_name = "Fallback Demo CSV"
@@ -791,9 +781,9 @@ elif mode == "Canlı CKAN API Dene":
         else:
             resource_labels = [
                 (
+                    f"[{r.get('resource_category', '-')}] "
                     f"{r['package']} | {r['name']} | {r['format'].upper()} "
-                    f"| Güncelleme: {r.get('resource_last_modified') or r.get('package_modified') or '-'} "
-                    f"| Arama: {r.get('matched_query', '-')}"
+                    f"| Skor: {r.get('relevance_score', 0)}"
                 )
                 for r in resources
             ]
@@ -809,10 +799,10 @@ elif mode == "Canlı CKAN API Dene":
 
             selected_resource["source_portal"] = selected_source_name
 
-            df_resources = pd.DataFrame(resources)
-
             with st.sidebar.expander("Bulunan Resource Detayları"):
                 display_cols = [
+                    "resource_category",
+                    "relevance_score",
                     "package",
                     "name",
                     "format",
@@ -821,10 +811,12 @@ elif mode == "Canlı CKAN API Dene":
                     "resource_last_modified",
                 ]
 
-                existing_cols = [c for c in display_cols if c in df_resources.columns]
+                existing_cols = [
+                    c for c in display_cols if c in candidate_resources_df.columns
+                ]
 
                 st.dataframe(
-                    df_resources[existing_cols],
+                    candidate_resources_df[existing_cols],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -843,6 +835,10 @@ elif mode == "Canlı CKAN API Dene":
                 raw_df["source_portal"] = selected_source_name
                 raw_df["source_resource"] = selected_resource_label
                 raw_df["source_url"] = selected_resource.get("url", "")
+                raw_df["resource_category"] = selected_resource.get("resource_category", "")
+                raw_df["relevance_score"] = selected_resource.get("relevance_score", 0)
+
+                loaded_resources_info = pd.DataFrame([selected_resource])
 
                 st.success(f"Canlı veri kaynağı yüklendi: {selected_source_name}")
                 st.caption(selected_resource_label)
@@ -868,7 +864,6 @@ elif mode == "Türkiye Geneli CKAN Taraması":
         max_value=100,
         value=50,
         step=10,
-        help="Her açık veri portalında her anahtar kelime için kaç paket aranacağını belirler.",
     )
 
     max_resources_to_load = st.sidebar.slider(
@@ -877,13 +872,11 @@ elif mode == "Türkiye Geneli CKAN Taraması":
         max_value=50,
         value=15,
         step=1,
-        help="Çok yüksek seçersen uygulama yavaşlayabilir.",
     )
 
     auto_load = st.sidebar.checkbox(
-        "Bulunan uygun kaynakları otomatik içeri al",
+        "Sadece barınak/bakımevi envanteri kaynaklarını otomatik içeri al",
         value=True,
-        help="Kapalı olursa bulunan resource'lar arasından elle seçim yapabilirsin.",
     )
 
     try:
@@ -891,6 +884,8 @@ elif mode == "Türkiye Geneli CKAN Taraması":
             resources = search_turkiye_ckan_resources(
                 rows_per_query=rows_per_query
             )
+
+        candidate_resources_df = pd.DataFrame(resources)
 
         if not resources:
             st.warning(
@@ -901,8 +896,6 @@ elif mode == "Türkiye Geneli CKAN Taraması":
             selected_resource_label = "Lokal CSV"
 
         else:
-            resources_df = pd.DataFrame(resources)
-
             st.success(
                 f"Türkiye geneli taramada {len(resources)} uygun resource adayı bulundu."
             )
@@ -910,6 +903,8 @@ elif mode == "Türkiye Geneli CKAN Taraması":
             with st.expander("🇹🇷 Türkiye Geneli Bulunan Resource Adayları", expanded=False):
                 display_cols = [
                     "source_portal",
+                    "resource_category",
+                    "relevance_score",
                     "package",
                     "name",
                     "format",
@@ -919,25 +914,40 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                     "url",
                 ]
 
-                existing_cols = [c for c in display_cols if c in resources_df.columns]
+                existing_cols = [
+                    c for c in display_cols if c in candidate_resources_df.columns
+                ]
 
                 st.dataframe(
-                    resources_df[existing_cols],
+                    candidate_resources_df[existing_cols],
                     use_container_width=True,
                     hide_index=True,
                 )
 
             if auto_load:
-                selected_resources = resources[:max_resources_to_load]
+                facility_resources = [
+                    r for r in resources
+                    if r.get("resource_category") == "shelter_facility"
+                ]
+
+                if not facility_resources:
+                    st.warning(
+                        "Barınak/bakımevi envanteri olarak sınıflanan resource bulunamadı. "
+                        "Ana dashboard için lokal demo veri kullanılacak."
+                    )
+                    selected_resources = []
+                else:
+                    selected_resources = facility_resources[:max_resources_to_load]
 
             else:
                 labels = [
                     (
+                        f"[{r.get('resource_category', '-')}] "
                         f"{r.get('source_portal', '-')} | "
                         f"{r.get('package', '-')} | "
                         f"{r.get('name', '-')} | "
                         f"{r.get('format', '').upper()} | "
-                        f"{r.get('matched_query', '-')}"
+                        f"Skor: {r.get('relevance_score', 0)}"
                     )
                     for r in resources
                 ]
@@ -954,58 +964,56 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                 ]
 
             if not selected_resources:
-                st.warning("Resource seçilmedi. Lokal demo veri kullanılıyor.")
                 raw_df = load_local_data(LOCAL_FILE)
                 selected_source_name = "Fallback Demo CSV"
                 selected_resource_label = "Lokal CSV"
 
             else:
-                with st.spinner("Seçilen Türkiye geneli resource dosyaları içeri alınıyor..."):
+                with st.spinner("Seçilen resource dosyaları içeri alınıyor..."):
                     raw_df, loaded_resources, failed_resources = load_multiple_resources(
                         selected_resources,
                         max_resources=max_resources_to_load,
+                        allowed_categories=["shelter_facility"],
                     )
 
                 failed_resource_count = len(failed_resources)
+                loaded_resources_info = pd.DataFrame(loaded_resources)
 
                 if raw_df.empty:
                     st.warning(
-                        "Seçilen resource dosyaları okunamadı veya boş geldi. Lokal demo veri kullanılıyor."
+                        "Seçilen barınak/bakımevi resource dosyaları okunamadı veya boş geldi. "
+                        "Lokal demo veri kullanılıyor."
                     )
                     raw_df = load_local_data(LOCAL_FILE)
                     selected_source_name = "Fallback Demo CSV"
                     selected_resource_label = "Lokal CSV"
-
                 else:
-                    loaded_resources_info = pd.DataFrame(loaded_resources)
-
                     st.success(
-                        f"{len(loaded_resources)} resource başarıyla içeri alındı. "
+                        f"{len(loaded_resources)} barınak/bakımevi resource başarıyla içeri alındı. "
                         f"{failed_resource_count} resource okunamadı/boş geldi."
                     )
 
                     with st.expander("İçeri Alınan Resource Listesi", expanded=False):
-                        if not loaded_resources_info.empty:
-                            display_cols = [
-                                "source_portal",
-                                "package",
-                                "name",
-                                "format",
-                                "matched_query",
-                                "url",
-                            ]
+                        display_cols = [
+                            "source_portal",
+                            "resource_category",
+                            "relevance_score",
+                            "package",
+                            "name",
+                            "format",
+                            "matched_query",
+                            "url",
+                        ]
 
-                            existing_cols = [
-                                c
-                                for c in display_cols
-                                if c in loaded_resources_info.columns
-                            ]
+                        existing_cols = [
+                            c for c in display_cols if c in loaded_resources_info.columns
+                        ]
 
-                            st.dataframe(
-                                loaded_resources_info[existing_cols],
-                                use_container_width=True,
-                                hide_index=True,
-                            )
+                        st.dataframe(
+                            loaded_resources_info[existing_cols],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
     except Exception as e:
         st.warning("Türkiye geneli tarama başarısız oldu. Lokal demo veri kullanılıyor.")
@@ -1016,13 +1024,44 @@ elif mode == "Türkiye Geneli CKAN Taraması":
 
 
 # ---------------------------------------------------------
-# Normalize + Risk + AI Insights + Snapshot
+# Normalize + Eligibility
 # ---------------------------------------------------------
-df = normalize_columns(raw_df)
+df_all_loaded = normalize_columns(raw_df)
+
+excluded_df = pd.DataFrame()
+
+if "analytics_eligible" in df_all_loaded.columns:
+    excluded_df = df_all_loaded[
+        df_all_loaded["analytics_eligible"] == False  # noqa: E712
+    ].copy()
+
+    df = df_all_loaded[
+        df_all_loaded["analytics_eligible"] == True  # noqa: E712
+    ].copy()
+else:
+    df = df_all_loaded.copy()
+
+if df.empty:
+    st.warning(
+        "Yüklenen kaynaklar ana barınak/bakımevi risk analitiği için uygun görünmüyor. "
+        "Kapasite, mevcut hayvan ve merkez adı gibi temel alanlar eksik olabilir. "
+        "Lokal demo veriye dönülüyor."
+    )
+
+    raw_df = load_local_data(LOCAL_FILE)
+    selected_source_name = "Fallback Demo CSV"
+    selected_resource_label = "Lokal CSV - analitik uygun kaynak bulunamadı"
+
+    df_all_loaded = normalize_columns(raw_df)
+    excluded_df = pd.DataFrame()
+    df = df_all_loaded.copy()
+
+
+# ---------------------------------------------------------
+# Risk + AI + History
+# ---------------------------------------------------------
 df = calculate_risk(df)
 df = create_action_recommendations(df)
-
-# Kural tabanlı AI benzeri analizler
 df = calculate_data_quality_score(df)
 df = generate_risk_explanations(df)
 
@@ -1045,21 +1084,31 @@ anomalies_df = detect_anomalies(
 # ---------------------------------------------------------
 st.sidebar.header("Filtreler")
 
-districts = sorted(df["district"].dropna().astype(str).unique().tolist())
 cities = sorted(df["city"].dropna().astype(str).unique().tolist())
+districts = sorted(df["district"].dropna().astype(str).unique().tolist())
 risk_levels = ["Düşük", "Orta", "Kritik"]
 
-selected_cities = st.sidebar.multiselect(
-    "İl seç",
-    cities,
-    default=cities,
-)
+use_city_filter = st.sidebar.checkbox("İl filtresi kullan", value=False)
 
-selected_districts = st.sidebar.multiselect(
-    "İlçe seç",
-    districts,
-    default=districts,
-)
+if use_city_filter:
+    selected_cities = st.sidebar.multiselect(
+        "İl seç",
+        cities,
+        default=cities,
+    )
+else:
+    selected_cities = cities
+
+use_district_filter = st.sidebar.checkbox("İlçe filtresi kullan", value=False)
+
+if use_district_filter:
+    selected_districts = st.sidebar.multiselect(
+        "İlçe seç",
+        districts,
+        default=districts,
+    )
+else:
+    selected_districts = districts
 
 selected_risks = st.sidebar.multiselect(
     "Risk seviyesi",
@@ -1079,7 +1128,9 @@ filtered_df = df[
 ].copy()
 
 if show_only_valid_coordinates:
-    filtered_df = filtered_df[filtered_df["coordinate_valid"] == True].copy()  # noqa: E712
+    filtered_df = filtered_df[
+        filtered_df["coordinate_valid"] == True  # noqa: E712
+    ].copy()
 
 district_summary = build_district_summary(filtered_df)
 
@@ -1089,17 +1140,62 @@ district_summary = build_district_summary(filtered_df)
 # ---------------------------------------------------------
 with st.expander("ℹ️ Prototip Bilgisi", expanded=False):
     render_methodology_note()
+
     st.write(f"**Aktif veri kaynağı:** {selected_source_name}")
     st.write(f"**Resource:** {selected_resource_label}")
     st.write(f"**Derin CKAN taraması:** {'Açık' if deep_scan else 'Kapalı'}")
     st.write("**Tarihsel snapshot dosyası:** `data/history/shelter_history.csv`")
 
+    st.markdown("#### Veri Ayrıştırma Özeti")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Aday Resource",
+        len(candidate_resources_df) if candidate_resources_df is not None else 0,
+    )
+
+    c2.metric(
+        "İçeri Alınan Resource",
+        len(loaded_resources_info) if loaded_resources_info is not None else 0,
+    )
+
+    c3.metric(
+        "Yüklenen Satır",
+        len(df_all_loaded) if df_all_loaded is not None else 0,
+    )
+
+    c4.metric(
+        "Dışlanan Satır",
+        len(excluded_df) if excluded_df is not None else 0,
+    )
+
     if mode == "Türkiye Geneli CKAN Taraması":
         st.write(f"**Türkiye geneli kaynak sayısı:** {len(TURKIYE_CKAN_SOURCES)}")
         st.write(f"**Başarısız/boş resource sayısı:** {failed_resource_count}")
 
-        if not loaded_resources_info.empty:
-            st.write(f"**İçeri alınan resource sayısı:** {len(loaded_resources_info)}")
+    if not excluded_df.empty:
+        with st.expander("Ana analitikten dışlanan kayıt/resource örnekleri"):
+            display_cols = [
+                "name",
+                "city",
+                "district",
+                "source_portal",
+                "source_resource",
+                "resource_category",
+                "analytics_exclusion_reason",
+            ]
+
+            display_cols = [
+                c for c in display_cols if c in excluded_df.columns
+            ]
+
+            st.dataframe(
+                excluded_df[display_cols].head(300),
+                use_container_width=True,
+                hide_index=True,
+            )
+
 
 render_kpis(filtered_df)
 
@@ -1107,19 +1203,25 @@ st.divider()
 
 
 # ---------------------------------------------------------
-# Map + Detail
+# Map + Record Detail
 # ---------------------------------------------------------
 left, right = st.columns([2.2, 1])
 
 with left:
     st.subheader("📍 GIS Haritası")
 
-    map_df = filtered_df[filtered_df["coordinate_valid"] == True].copy()  # noqa: E712
+    map_df = filtered_df[
+        filtered_df["coordinate_valid"] == True  # noqa: E712
+    ].copy()
 
     if len(map_df) == 0:
-        st.warning("Harita için geçerli koordinata sahip kayıt bulunamadı.")
+        st.warning(
+            "Harita için geçerli koordinata sahip kayıt bulunamadı. "
+            "Türkiye geneli kaynakların çoğunda koordinat alanı olmayabilir."
+        )
     else:
         shelter_map = create_shelter_map(map_df)
+
         st_folium(
             shelter_map,
             width=1100,
@@ -1130,6 +1232,7 @@ with left:
 with right:
     render_record_detail(filtered_df)
 
+
 st.divider()
 
 
@@ -1138,13 +1241,14 @@ st.divider()
 # ---------------------------------------------------------
 st.subheader("📊 Dashboard")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
     [
         "Risk Skoru",
         "Doluluk",
         "İlçe Özeti",
         "Geçmiş Analitik",
         "AI Analiz",
+        "Kaynak Yönetimi",
         "Veri Kalitesi",
         "Ham Veri",
         "Rapor",
@@ -1152,6 +1256,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
     ]
 )
 
+
+# ---------------------------------------------------------
+# Tab 1 - Risk Score
+# ---------------------------------------------------------
 with tab1:
     st.plotly_chart(
         chart_risk_score(filtered_df),
@@ -1165,6 +1273,7 @@ with tab1:
         "city",
         "district",
         "source_portal",
+        "resource_category",
         "risk_level",
         "risk_score",
         "occupancy_rate",
@@ -1174,25 +1283,73 @@ with tab1:
         "risk_explanation",
     ]
 
-    priority_cols = [c for c in priority_cols if c in filtered_df.columns]
+    priority_cols = [
+        c for c in priority_cols if c in filtered_df.columns
+    ]
 
-    st.dataframe(
-        filtered_df.sort_values("risk_score", ascending=False)[priority_cols],
-        use_container_width=True,
-        hide_index=True,
-    )
+    if filtered_df.empty:
+        st.warning("Filtreye uygun kayıt bulunamadı.")
+    else:
+        st.dataframe(
+            filtered_df.sort_values(
+                "risk_score",
+                ascending=False,
+            )[priority_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
 
+
+# ---------------------------------------------------------
+# Tab 2 - Occupancy
+# ---------------------------------------------------------
 with tab2:
     st.plotly_chart(
         chart_occupancy_rate(filtered_df),
         use_container_width=True,
     )
 
+    st.markdown("#### Doluluk Detay Tablosu")
+
+    occupancy_cols = [
+        "name",
+        "city",
+        "district",
+        "capacity",
+        "occupancy",
+        "occupancy_rate",
+        "risk_level",
+        "risk_score",
+        "source_portal",
+    ]
+
+    occupancy_cols = [
+        c for c in occupancy_cols if c in filtered_df.columns
+    ]
+
+    if filtered_df.empty:
+        st.warning("Filtreye uygun kayıt bulunamadı.")
+    else:
+        st.dataframe(
+            filtered_df.sort_values(
+                "occupancy_rate",
+                ascending=False,
+            )[occupancy_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# ---------------------------------------------------------
+# Tab 3 - District Summary
+# ---------------------------------------------------------
 with tab3:
     st.plotly_chart(
         chart_district_avg_risk(district_summary),
         use_container_width=True,
     )
+
+    st.markdown("#### İlçe Bazlı Özet")
 
     st.dataframe(
         district_summary,
@@ -1200,9 +1357,20 @@ with tab3:
         hide_index=True,
     )
 
-with tab4:
-    render_history_analytics(history_df, history_summary_df)
 
+# ---------------------------------------------------------
+# Tab 4 - Historical Analytics
+# ---------------------------------------------------------
+with tab4:
+    render_history_analytics(
+        history_df,
+        history_summary_df,
+    )
+
+
+# ---------------------------------------------------------
+# Tab 5 - AI Analysis
+# ---------------------------------------------------------
 with tab5:
     render_ai_analysis(
         filtered_df=filtered_df,
@@ -1210,8 +1378,26 @@ with tab5:
         anomalies_df=anomalies_df,
     )
 
+
+# ---------------------------------------------------------
+# Tab 6 - Source Management
+# ---------------------------------------------------------
 with tab6:
+    render_source_management(
+        candidate_resources_df=candidate_resources_df,
+        loaded_resources_info=loaded_resources_info,
+        excluded_df=excluded_df,
+        df_all_loaded=df_all_loaded,
+    )
+
+
+# ---------------------------------------------------------
+# Tab 7 - Data Quality
+# ---------------------------------------------------------
+with tab7:
     render_data_quality_summary(filtered_df)
+
+    st.markdown("#### Veri Kalitesi Detayı")
 
     quality_cols = [
         "name",
@@ -1219,51 +1405,116 @@ with tab6:
         "district",
         "source_portal",
         "source_resource",
+        "resource_category",
         "data_quality_score",
         "data_quality_level",
         "coordinate_valid",
-        "is_estimated",
+        "analytics_eligible",
         "capacity_estimated",
         "occupancy_estimated",
         "vet_count_estimated",
+        "sterilization_count_estimated",
+        "adoption_count_estimated",
         "data_quality_note",
     ]
 
-    quality_cols = [c for c in quality_cols if c in filtered_df.columns]
+    quality_cols = [
+        c for c in quality_cols if c in filtered_df.columns
+    ]
 
-    st.markdown("#### Veri Kalitesi Detayı")
+    if filtered_df.empty:
+        st.warning("Filtreye uygun kayıt bulunamadı.")
+    else:
+        st.dataframe(
+            filtered_df.sort_values(
+                "data_quality_score",
+                ascending=True,
+            )[quality_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.dataframe(
-        filtered_df[quality_cols],
-        use_container_width=True,
-        hide_index=True,
-    )
+    if not excluded_df.empty:
+        st.markdown("#### Ana Analitikten Dışlanan Kayıtlar")
 
-with tab7:
-    st.dataframe(
-        filtered_df,
-        use_container_width=True,
-        hide_index=True,
-    )
+        excluded_cols = [
+            "name",
+            "city",
+            "district",
+            "source_portal",
+            "source_resource",
+            "resource_category",
+            "analytics_exclusion_reason",
+            "data_quality_note",
+        ]
 
+        excluded_cols = [
+            c for c in excluded_cols if c in excluded_df.columns
+        ]
+
+        st.warning(
+            "Aşağıdaki kayıtlar yüklendi ancak ana kapasite/doluluk/risk "
+            "analitiğine uygun görülmediği için KPI ve risk hesaplarına dahil edilmedi."
+        )
+
+        st.dataframe(
+            excluded_df[excluded_cols].head(500),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# ---------------------------------------------------------
+# Tab 8 - Raw Data
+# ---------------------------------------------------------
 with tab8:
-    render_report_downloads(
+    st.markdown("#### Ana Analitik Veri Seti")
+
+    st.dataframe(
         filtered_df,
-        district_summary,
-        history_df,
-        history_summary_df,
-        anomalies_df,
+        use_container_width=True,
+        hide_index=True,
     )
 
+    st.markdown("#### Tüm Yüklenen Normalize Veri")
+
+    st.caption(
+        "Bu tablo, ana analitiğe dahil edilen ve dışlanan tüm normalize edilmiş kayıtları gösterir."
+    )
+
+    st.dataframe(
+        df_all_loaded,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+# ---------------------------------------------------------
+# Tab 9 - Reports
+# ---------------------------------------------------------
 with tab9:
+    render_report_downloads(
+        df=filtered_df,
+        district_summary=district_summary,
+        history_df=history_df,
+        history_summary_df=history_summary_df,
+        anomalies_df=anomalies_df,
+        excluded_df=excluded_df,
+    )
+
+
+# ---------------------------------------------------------
+# Tab 10 - Project Vision
+# ---------------------------------------------------------
+with tab10:
     st.markdown(
         """
         ### 🌍 SmartShelter GIS Vizyonu
 
         SmartShelter GIS; belediyeler, Tarım ve Orman Bakanlığı, STK'lar ve yerel yönetimler arasında
-        ortak bir veri dili oluşturmayı hedefleyen açık veri tabanlı bir karar destek prototipidir.
+        ortak bir veri dili oluşturmayı hedefleyen açık veri tabanlı bir GIS karar destek prototipidir.
 
-        #### Temel amaçlar
+        #### Temel Amaçlar
 
         - Hayvan bakımevleri ve toplama merkezlerini harita üzerinde izlemek
         - Kapasite ve doluluk baskısını görünür hale getirmek
@@ -1272,14 +1523,28 @@ with tab9:
         - Kritik merkezleri önceliklendirmek
         - İl/ilçe bazlı operasyonel planlamaya destek olmak
         - Geçmiş veriler üzerinden değişim analizi yapmak
-        - Eski/güncel açık veri kaynaklarını birlikte izlemek
-        - Türkiye geneli açık veri portallarından CKAN tabanlı veri taramak
+        - Türkiye geneli açık veri kaynaklarını sınıflandırarak analiz etmek
         - AI benzeri karar destek analizleri üretmek
 
-        #### AI destekli karar destek yaklaşımı
+        #### Kaynak Ayrıştırma Yaklaşımı
 
-        Bu prototipte ilk aşama AI modülleri harici model kullanmadan, şeffaf ve kural tabanlı olarak
-        geliştirilmiştir. Sistem şu çıktıları üretebilir:
+        Türkiye geneli açık veri portallarında "hayvan" veya "veteriner" geçen çok sayıda farklı veri seti bulunur.
+        Bu veri setlerinin tamamı barınak kapasite/doluluk analizi için uygun değildir.
+
+        Bu nedenle sistem kaynakları şu kategorilere ayırır:
+
+        - **shelter_facility:** Barınak, bakımevi, geçici hayvan bakım merkezi gibi ana envanter kaynakları
+        - **operation_stats:** İşlem sayısı, yıllık istatistik, denetim, evcil hayvan varlığı gibi operasyonel kaynaklar
+        - **general_animal:** Hayvan/veteriner konulu ama envanter olduğu net olmayan kaynaklar
+        - **irrelevant:** Ana konu ile ilgisiz kaynaklar
+
+        Ana risk dashboard'una yalnızca analitik olarak uygun görülen kayıtlar dahil edilir.
+        Kapasite ve mevcut hayvan alanları olmayan büyük istatistik dosyaları KPI hesaplarını şişirmemek için dışlanır.
+
+        #### AI Destekli Karar Destek Yaklaşımı
+
+        Bu prototipteki AI modülü harici model kullanmadan, şeffaf ve kural tabanlı olarak çalışır.
+        Sistem şu çıktıları üretir:
 
         - Yönetici özeti
         - Risk açıklaması
@@ -1288,7 +1553,7 @@ with tab9:
         - Müdahale senaryosu simülasyonu
         - Operasyonel öncelik listesi
 
-        #### Geçmiş analitik yaklaşımı
+        #### Geçmiş Analitik Yaklaşımı
 
         Sistem her veri çekiminde günlük bir snapshot oluşturur. Böylece şu sorular yanıtlanabilir:
 
@@ -1299,14 +1564,7 @@ with tab9:
         - Hangi merkez yeni eklendi veya veri kaynağından çıktı?
         - Tahmini veri kullanılan kayıt sayısı zamanla azaldı mı?
 
-        #### Türkiye geneli tarama yaklaşımı
-
-        Türkiye geneli tarama modunda sistem, bilinen CKAN tabanlı açık veri portallarında
-        hayvan, barınak, bakımevi, veteriner, kısırlaştırma ve rehabilitasyon gibi anahtar
-        kelimelerle resource araması yapar. Bulunan CSV, XLSX, XLS, JSON ve ODS kaynaklarını
-        okuyarak tek veri setinde birleştirir.
-
-        #### Önerilen sonraki aşamalar
+        #### Önerilen Sonraki Aşamalar
 
         1. Ulusal veri standardı oluşturulması  
         2. Belediye sistemleriyle API entegrasyonu  
@@ -1315,15 +1573,17 @@ with tab9:
         5. Gerçek zamanlı kapasite ve vaka takibi  
         6. Bakanlık düzeyinde izleme ve raporlama ekranı  
         7. Zaman serisi tabanlı erken uyarı sistemi  
-        8. CKAN dışı belediye web sayfaları için kontrollü scraping modülü  
-        9. Manuel Excel/CSV yükleme ekranı  
-        10. Gerçek AI/LLM destekli doğal dil sorgulama ve otomatik raporlama  
+        8. Operasyonel istatistik kaynakları için ayrı analiz sekmesi  
+        9. CKAN dışı belediye web sayfaları için kontrollü scraping modülü  
+        10. LLM destekli doğal dil sorgulama ve otomatik raporlama  
 
         > Not: Bu uygulama resmi bir sistem değil, karar destek amaçlı çalışan prototip bir yazılımdır.
         """
     )
 
+
 st.info(
     "Canlı API erişimi başarısız olursa sistem otomatik olarak lokal stabil CSV verisine döner. "
+    "Türkiye geneli taramada işlem/istatistik kaynakları ana KPI hesaplarına karıştırılmaz. "
     "Her veri çekimi günlük snapshot olarak tarihsel arşive eklenir."
 )
