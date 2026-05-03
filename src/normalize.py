@@ -49,6 +49,53 @@ def coalesce_duplicate_columns(df):
     return df
 
 
+def infer_location_from_source(df):
+    """
+    Kaynak portal adından il/ilçe tahmini.
+    Bu yalnızca kaynakta il/ilçe yoksa devreye girer.
+    """
+
+    if "source_portal" not in df.columns:
+        return df
+
+    portal = df["source_portal"].astype(str).str.lower()
+
+    city_map = {
+        "ibb": "İstanbul",
+        "b40": "İstanbul",
+        "kadıköy": "İstanbul",
+        "kadikoy": "İstanbul",
+        "tuzla": "İstanbul",
+        "izmir": "İzmir",
+        "kocaeli": "Kocaeli",
+        "konya": "Konya",
+        "ordu": "Ordu",
+        "gaziantep": "Gaziantep",
+    }
+
+    district_map = {
+        "kadıköy": "Kadıköy",
+        "kadikoy": "Kadıköy",
+        "tuzla": "Tuzla",
+    }
+
+    for key, city in city_map.items():
+        mask = portal.str.contains(key, na=False)
+        df.loc[
+            mask & df["city"].astype(str).str.strip().isin(["", "nan", "Belirtilmemiş"]),
+            "city",
+        ] = city
+
+    for key, district in district_map.items():
+        mask = portal.str.contains(key, na=False)
+        df.loc[
+            mask & df["district"].astype(str).str.strip().isin(["", "nan", "Belirtilmemiş"]),
+            "district",
+        ] = district
+
+    return df
+
+
 def normalize_columns(df):
     df = df.copy()
 
@@ -74,6 +121,8 @@ def normalize_columns(df):
         "merkez",
         "barinak",
         "bakimevi",
+        "facility_name",
+        "name",
     ]
 
     district_candidates = [
@@ -126,7 +175,7 @@ def normalize_columns(df):
         elif c in lon_candidates:
             rename_map[c] = "lon"
 
-        elif "kapasite" in c:
+        elif "kapasite" in c or "capacity" in c:
             rename_map[c] = "capacity"
 
         elif (
@@ -135,22 +184,23 @@ def normalize_columns(df):
             or "hayvan_sayisi" in c
             or "hayvan_adedi" in c
             or "barinan_hayvan" in c
+            or "occupancy" in c
         ):
             rename_map[c] = "occupancy"
 
-        elif "veteriner" in c:
+        elif "veteriner" in c or "vet" == c or "vet_count" in c:
             rename_map[c] = "vet_count"
 
-        elif "kisir" in c or "kisirlastirma" in c:
+        elif "kisir" in c or "kisirlastirma" in c or "sterilization" in c:
             rename_map[c] = "sterilization_count"
 
-        elif "sahip" in c or "sahiplendirme" in c:
+        elif "sahip" in c or "sahiplendirme" in c or "adoption" in c:
             rename_map[c] = "adoption_count"
 
-        elif "adres" in c:
+        elif "adres" in c or "address" in c:
             rename_map[c] = "address"
 
-        elif "telefon" in c or c == "tel" or "iletisim" in c:
+        elif "telefon" in c or c == "tel" or "iletisim" in c or "phone" in c:
             rename_map[c] = "phone"
 
         elif "tarih" in c or "guncelleme" in c or "updated" in c:
@@ -159,7 +209,6 @@ def normalize_columns(df):
     df = df.rename(columns=rename_map)
     df = coalesce_duplicate_columns(df)
 
-    # Kritik alanlar: kalite notuna yazılır.
     critical_defaults = {
         "name": "Hayvan Bakımevi / Toplama Merkezi",
         "city": "Belirtilmemiş",
@@ -173,11 +222,15 @@ def normalize_columns(df):
         "adoption_count": None,
     }
 
-    # Opsiyonel alanlar: eksikse kalite problemi sayılmaz.
     optional_defaults = {
         "address": "",
         "phone": "",
         "updated_at": "",
+        "source_portal": "",
+        "source_resource": "",
+        "source_url": "",
+        "resource_category": "",
+        "relevance_score": 0,
     }
 
     df["data_quality_note"] = ""
@@ -185,7 +238,10 @@ def normalize_columns(df):
     for col, default in critical_defaults.items():
         if col not in df.columns:
             df[col] = default
-            df["data_quality_note"] += f"{col} alanı kaynakta yok; "
+
+            # Sadece ana kimlik ve temel metriklerde not üret.
+            if col in ["name", "city", "district", "capacity", "occupancy", "vet_count"]:
+                df["data_quality_note"] += f"{col} alanı kaynakta yok; "
 
     for col, default in optional_defaults.items():
         if col not in df.columns:
@@ -198,12 +254,41 @@ def normalize_columns(df):
         "address",
         "phone",
         "updated_at",
+        "source_portal",
+        "source_resource",
+        "source_url",
+        "resource_category",
     ]
 
     for col in text_cols:
         default = critical_defaults.get(col, optional_defaults.get(col, ""))
         df[col] = df[col].fillna(default).astype(str)
         df[col] = df[col].replace({"nan": default})
+
+    # Eğer name yoksa ama source_resource varsa, kaynak adından daha anlamlı ad üret.
+    default_name_mask = (
+        df["name"].astype(str).str.strip()
+        == "Hayvan Bakımevi / Toplama Merkezi"
+    )
+
+    has_source_resource = df["source_resource"].astype(str).str.strip().ne("")
+
+    df.loc[
+        default_name_mask & has_source_resource,
+        "name",
+    ] = (
+        df.loc[default_name_mask & has_source_resource, "source_resource"]
+        .astype(str)
+        .str.split("|")
+        .str[-1]
+        .str.replace(".csv", "", regex=False)
+        .str.replace(".xlsx", "", regex=False)
+        .str.replace(".xls", "", regex=False)
+        .str.replace("_", " ", regex=False)
+        .str.strip()
+    )
+
+    df = infer_location_from_source(df)
 
     numeric_cols = [
         "lat",
@@ -213,6 +298,7 @@ def normalize_columns(df):
         "vet_count",
         "sterilization_count",
         "adoption_count",
+        "relevance_score",
     ]
 
     for col in numeric_cols:
@@ -232,9 +318,12 @@ def normalize_columns(df):
 
         missing_mask = df[col].isna()
         df.loc[missing_mask, col] = fallback
-        df.loc[missing_mask, "data_quality_note"] += (
-            f"{col} tahmini değerle tamamlandı; "
-        )
+
+        # Kısırlaştırma/sahiplendirme eksikliği çok yaygın olduğu için kalite notunu şişirmeyelim.
+        if col in ["capacity", "occupancy", "vet_count"]:
+            df.loc[missing_mask, "data_quality_note"] += (
+                f"{col} tahmini değerle tamamlandı; "
+            )
 
     df["coordinate_valid"] = (
         df["lat"].notna()
@@ -256,15 +345,40 @@ def normalize_columns(df):
     df["sterilization_count"] = df["sterilization_count"].clip(lower=0)
     df["adoption_count"] = df["adoption_count"].clip(lower=0)
 
-    # Türkiye geneli taramada kaynak takibi için kolonlar yoksa oluştur.
-    if "source_portal" not in df.columns:
-        df["source_portal"] = ""
+    # Ana risk dashboard'una uygunluk kontrolü
+    df["analytics_eligible"] = True
+    df["analytics_exclusion_reason"] = ""
 
-    if "source_resource" not in df.columns:
-        df["source_resource"] = ""
+    if "resource_category" in df.columns:
+        cat = df["resource_category"].astype(str)
+        category_known_mask = cat.str.strip().ne("")
+        not_facility_mask = category_known_mask & cat.ne("shelter_facility")
 
-    if "source_url" not in df.columns:
-        df["source_url"] = ""
+        df.loc[not_facility_mask, "analytics_eligible"] = False
+        df.loc[not_facility_mask, "analytics_exclusion_reason"] += (
+            "resource barınak/bakımevi envanteri değil; "
+        )
+
+    missing_core_metrics_mask = (
+        df["capacity_estimated"].astype(bool)
+        & df["occupancy_estimated"].astype(bool)
+    )
+
+    df.loc[missing_core_metrics_mask, "analytics_eligible"] = False
+    df.loc[missing_core_metrics_mask, "analytics_exclusion_reason"] += (
+        "kapasite ve mevcut hayvan alanları kaynakta yok; "
+    )
+
+    default_or_empty_name_mask = (
+        df["name"].astype(str).str.strip().isin(
+            ["", "nan", "Hayvan Bakımevi / Toplama Merkezi"]
+        )
+    )
+
+    df.loc[default_or_empty_name_mask, "analytics_eligible"] = False
+    df.loc[default_or_empty_name_mask, "analytics_exclusion_reason"] += (
+        "merkez adı kaynakta yok; "
+    )
 
     return df
 
@@ -287,6 +401,8 @@ def create_empty_normalized_df():
         "source_portal",
         "source_resource",
         "source_url",
+        "resource_category",
+        "relevance_score",
         "data_quality_note",
         "capacity_estimated",
         "occupancy_estimated",
@@ -295,6 +411,8 @@ def create_empty_normalized_df():
         "adoption_count_estimated",
         "coordinate_valid",
         "is_estimated",
+        "analytics_eligible",
+        "analytics_exclusion_reason",
     ]
 
     return pd.DataFrame(columns=columns)
