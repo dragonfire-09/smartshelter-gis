@@ -21,15 +21,16 @@ RESOURCE_ID = "42045805-70d1-49f4-87cf-63fb50941952"
 @st.cache_data(ttl=3600)
 def load_kocaeli_data():
     try:
-        response = requests.get(RESOURCE_URL, timeout=20)
+        url = "https://veri.kocaeli.bel.tr/api/3/action/datastore_search?resource_id=2d4d8712-eb4b-428d-99fb-eb38c490bddb"
+
+        response = requests.get(url, timeout=20)
         response.raise_for_status()
-        package = response.json()
 
-        resources = package["result"]["resources"]
-        resource = [r for r in resources if r["id"] == RESOURCE_ID][0]
-        file_url = resource["url"]
+        data = response.json()
+        records = data["result"]["records"]
 
-        df = pd.read_json(file_url)
+        df = pd.DataFrame(records)
+
         return df
 
     except Exception as e:
@@ -52,7 +53,6 @@ def load_kocaeli_data():
             "sterilization_count": [1200, 850, 640],
             "adoption_count": [320, 180, 210]
         })
-
 
 def normalize_columns(df):
     df = df.copy()
