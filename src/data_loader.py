@@ -141,22 +141,6 @@ def make_ckan_api_url(base_url):
 
 
 def classify_resource(resource):
-    """
-    CKAN resource sınıflandırması.
-
-    shelter_facility:
-        Barınak, bakımevi, geçici hayvan bakım merkezi gibi envanter olma ihtimali yüksek kaynaklar.
-
-    operation_stats:
-        İşlem sayısı, istatistik, denetim, evcil hayvan varlığı gibi operasyonel/istatistiksel kaynaklar.
-
-    general_animal:
-        Hayvan/veteriner konulu ama barınak envanteri olduğu net olmayan kaynaklar.
-
-    irrelevant:
-        İlgisiz kaynaklar.
-    """
-
     text = " ".join(
         [
             str(resource.get("source_portal", "")),
@@ -184,13 +168,13 @@ def classify_resource(resource):
         "barinak",
         "bakımevi",
         "bakimevi",
+        "animal shelter",
+        "shelter",
     ]
 
     operation_keywords = [
         "işlem sayıları",
         "islem sayilari",
-        "işlem_sayıları",
-        "islem_sayilari",
         "işlemleri",
         "islemleri",
         "istatistik",
@@ -210,14 +194,15 @@ def classify_resource(resource):
         "mucadele",
         "sağlık kurum",
         "saglik kurum",
-        "kuruluşlarına ilişkin",
-        "kuruluslarina iliskin",
         "vdym",
         "sayısı",
         "sayisi",
+        "number and capacities",
+        "by years",
+        "years",
     ]
 
-    general_animal_keywords = [
+    general_keywords = [
         "hayvan",
         "veteriner",
         "sahipsiz",
@@ -227,6 +212,7 @@ def classify_resource(resource):
     ]
 
     if any(k in text for k in shelter_keywords):
+        # Kapasite/yıl/istatistik tipi dosyalar barınakla ilgili olsa bile ayrı stats olabilir.
         if any(k in text for k in operation_keywords):
             return "operation_stats"
         return "shelter_facility"
@@ -234,23 +220,21 @@ def classify_resource(resource):
     if any(k in text for k in operation_keywords):
         return "operation_stats"
 
-    if any(k in text for k in general_animal_keywords):
+    if any(k in text for k in general_keywords):
         return "general_animal"
 
     return "irrelevant"
 
 
 def resource_relevance_score(resource):
-    category = classify_resource(resource)
-
     score_map = {
         "shelter_facility": 100,
-        "operation_stats": 45,
+        "operation_stats": 60,
         "general_animal": 25,
         "irrelevant": 0,
     }
 
-    return score_map.get(category, 0)
+    return score_map.get(classify_resource(resource), 0)
 
 
 def is_relevant_resource(resource):
@@ -307,13 +291,7 @@ def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
                 fmt = infer_format(res)
                 name = res.get("name", package_title)
 
-                if not url:
-                    continue
-
-                if url in seen_urls:
-                    continue
-
-                if fmt not in allowed_formats:
+                if not url or url in seen_urls or fmt not in allowed_formats:
                     continue
 
                 seen_urls.add(url)
@@ -377,10 +355,12 @@ def search_turkiye_ckan_resources(rows_per_query=50):
                 continue
 
             seen_urls.add(url)
+
             r["source_portal"] = source_name
             r["source_base"] = source["base"]
             r["resource_category"] = classify_resource(r)
             r["relevance_score"] = resource_relevance_score(r)
+
             all_resources.append(r)
 
     all_resources = sorted(
@@ -478,19 +458,7 @@ def load_resource_with_metadata(resource):
     return df
 
 
-def load_multiple_resources(
-    resources,
-    max_resources=20,
-    allowed_categories=None,
-):
-    """
-    Çoklu resource yükler.
-
-    allowed_categories verilirse sadece o kategorideki kaynakları içeri alır.
-    Ana dashboard için önerilen:
-        allowed_categories=["shelter_facility"]
-    """
-
+def load_multiple_resources(resources, max_resources=20, allowed_categories=None):
     if allowed_categories is not None:
         resources = [
             r for r in resources
@@ -507,9 +475,6 @@ def load_multiple_resources(
         if df.empty:
             failed_resources.append(resource)
             continue
-
-        df["resource_category"] = resource.get("resource_category", "")
-        df["relevance_score"] = resource.get("relevance_score", 0)
 
         frames.append(df)
         loaded_resources.append(resource)
