@@ -21,38 +21,11 @@ RESOURCE_ID = "42045805-70d1-49f4-87cf-63fb50941952"
 @st.cache_data(ttl=3600)
 def load_kocaeli_data():
     try:
-        url = "https://veri.kocaeli.bel.tr/api/3/action/datastore_search?resource_id=2d4d8712-eb4b-428d-99fb-eb38c490bddb"
-
-        response = requests.get(url, timeout=20)
-        response.raise_for_status()
-
-        data = response.json()
-        records = data["result"]["records"]
-
-        df = pd.DataFrame(records)
-
-        return df
-
+        return pd.read_csv("data/kocaeli_shelters.csv")
     except Exception as e:
-        st.warning("Canlı veri çekilemedi. Demo veri kullanılıyor.")
+        st.error("Yerel veri dosyası okunamadı.")
         st.error(str(e))
-
-        return pd.DataFrame({
-            "name": [
-                "Kocaeli Sokak Hayvanları Toplama Merkezi",
-                "Gebze Hayvan Toplama Merkezi",
-                "İzmit Geçici Hayvan Bakımevi"
-            ],
-            "city": ["Kocaeli", "Kocaeli", "Kocaeli"],
-            "district": ["İzmit", "Gebze", "İzmit"],
-            "lat": [40.7654, 40.8028, 40.7666],
-            "lon": [29.9408, 29.4307, 29.9169],
-            "capacity": [500, 300, 250],
-            "occupancy": [430, 285, 180],
-            "vet_count": [4, 2, 3],
-            "sterilization_count": [1200, 850, 640],
-            "adoption_count": [320, 180, 210]
-        })
+        return pd.DataFrame()
 
 def normalize_columns(df):
     df = df.copy()
