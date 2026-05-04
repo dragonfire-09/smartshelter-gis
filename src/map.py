@@ -1,17 +1,3 @@
-"""
-SmartShelter GIS harita modülü.
-
-Folium tabanlı interaktif barınak haritası üretir.
-
-Özellikler:
-- Stadia Maps tile layer desteği
-- Streamlit secrets üzerinden STADIA_API_KEY okuma
-- OpenStreetMap / CartoDB / Esri harita katmanları
-- Marker, cluster, kritik risk markerları
-- Risk heatmap
-- Legend ve fullscreen kontrolü
-"""
-
 from __future__ import annotations
 
 import html
@@ -22,10 +8,6 @@ import folium
 import pandas as pd
 from folium.plugins import HeatMap, MarkerCluster
 
-
-# ---------------------------------------------------------------------
-# Sabitler
-# ---------------------------------------------------------------------
 
 TURKEY_CENTER = [39.0, 35.0]
 DEFAULT_ZOOM = 6
@@ -40,23 +22,7 @@ RISK_COLORS = {
 }
 
 
-# ---------------------------------------------------------------------
-# Secret / API key yardımcıları
-# ---------------------------------------------------------------------
-
 def _get_stadia_api_key() -> str:
-    """
-    Stadia Maps API key'i okur.
-
-    Öncelik sırası:
-    1. Streamlit secrets -> STADIA_API_KEY
-    2. Environment variable -> STADIA_API_KEY
-    3. Boş string
-
-    Streamlit Cloud'da Secrets alanına şunu eklemiş olmalısın:
-
-    STADIA_API_KEY = "senin_api_keyin"
-    """
     try:
         import streamlit as st
 
@@ -72,30 +38,23 @@ def _get_stadia_api_key() -> str:
 STADIA_API_KEY = _get_stadia_api_key()
 
 
-# ---------------------------------------------------------------------
-# Yardımcı fonksiyonlar
-# ---------------------------------------------------------------------
-
 def _safe_float(val: Any, default: float | None = None) -> float | None:
-    """Güvenli float dönüşümü."""
     try:
         if pd.isna(val):
             return default
         return float(val)
-    except (TypeError, ValueError):
+    except Exception:
         return default
 
 
 def _safe_str(val: Any, default: str = "—") -> str:
-    """Güvenli string dönüşümü."""
     try:
         if pd.isna(val):
             return default
-    except (TypeError, ValueError):
+    except Exception:
         pass
 
     s = str(val).strip()
-
     if not s or s.lower() in ("nan", "none", "<na>"):
         return default
 
@@ -103,16 +62,10 @@ def _safe_str(val: Any, default: str = "—") -> str:
 
 
 def _html_escape(val: Any, default: str = "—") -> str:
-    """Popup içinde güvenli HTML metni."""
     return html.escape(_safe_str(val, default))
 
 
 def _compute_center(df: pd.DataFrame | None):
-    """
-    Harita merkezini veri setinden hesaplar.
-
-    Eğer geçerli koordinat yoksa Türkiye merkezi döner.
-    """
     if df is None or df.empty:
         return TURKEY_CENTER, DEFAULT_ZOOM
 
@@ -159,9 +112,6 @@ def _compute_center(df: pd.DataFrame | None):
 
 
 def _is_default_tile(layer_name: str, default_tile: str | None) -> bool:
-    """
-    Hangi base layer başlangıçta açık gelsin kontrol eder.
-    """
     if not default_tile:
         return False
 
@@ -172,12 +122,6 @@ def _is_default_tile(layer_name: str, default_tile: str | None) -> bool:
 
 
 def _stadia_url(style: str) -> str:
-    """
-    Stadia Maps tile URL oluşturur.
-
-    API key varsa URL'ye ekler.
-    Yoksa key'siz URL döner.
-    """
     base_url = (
         f"https://tiles.stadiamaps.com/tiles/{style}"
         f"/{{z}}/{{x}}/{{y}}{{r}}.png"
@@ -189,20 +133,10 @@ def _stadia_url(style: str) -> str:
     return base_url
 
 
-# ---------------------------------------------------------------------
-# Tile layer fonksiyonları
-# ---------------------------------------------------------------------
-
 def _add_tile_layers(
     m: folium.Map,
     default_tile: str = "Stadia OSM Bright",
 ):
-    """
-    Harita için farklı tema katmanlarını ekler.
-
-    Stadia Maps katmanları Streamlit secrets içindeki STADIA_API_KEY ile çalışır.
-    """
-
     default_tile = default_tile or "Stadia OSM Bright"
 
     stadia_attr = (
@@ -212,10 +146,7 @@ def _add_tile_layers(
         "OpenStreetMap contributors</a>"
     )
 
-    # -----------------------------------------------------------------
-    # Stadia Maps katmanları
-    # -----------------------------------------------------------------
-
+    # Stadia Maps
     folium.TileLayer(
         tiles=_stadia_url("osm_bright"),
         name="🧭 Stadia OSM Bright",
@@ -266,10 +197,7 @@ def _add_tile_layers(
         show=_is_default_tile("Stadia Alpenglow", default_tile),
     ).add_to(m)
 
-    # -----------------------------------------------------------------
-    # OpenStreetMap / CartoDB katmanları
-    # -----------------------------------------------------------------
-
+    # OpenStreetMap / CartoDB
     folium.TileLayer(
         tiles="OpenStreetMap",
         name="🗺️ OpenStreetMap",
@@ -306,10 +234,7 @@ def _add_tile_layers(
         ),
     ).add_to(m)
 
-    # -----------------------------------------------------------------
-    # Esri katmanları
-    # -----------------------------------------------------------------
-
+    # Esri
     folium.TileLayer(
         tiles=(
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
@@ -358,8 +283,6 @@ def _add_tile_layers(
         ),
     ).add_to(m)
 
-    # Esri hibrit etiket katmanı.
-    # Bu base layer değil, overlay olarak çalışır.
     folium.TileLayer(
         tiles=(
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
@@ -374,13 +297,7 @@ def _add_tile_layers(
     ).add_to(m)
 
 
-# ---------------------------------------------------------------------
-# Popup / marker fonksiyonları
-# ---------------------------------------------------------------------
-
 def _build_popup(row: pd.Series) -> str:
-    """Marker popup HTML'i oluşturur."""
-
     name = _html_escape(row.get("name"))
     city = _html_escape(row.get("city"))
     district = _html_escape(row.get("district"))
@@ -404,29 +321,14 @@ def _build_popup(row: pd.Series) -> str:
         min-width: 240px;
         max-width: 320px;
     ">
-        <h4 style="margin: 0 0 8px 0; color: #1e3a8a;">
-            🏥 {name}
-        </h4>
-
-        <p style="margin: 4px 0;">
-            <b>📍 Konum:</b> {city} / {district}
-        </p>
-
-        <p style="margin: 4px 0;">
-            <b>🏠 Kapasite:</b> {cap_txt}
-        </p>
-
-        <p style="margin: 4px 0;">
-            <b>🐾 Mevcut Hayvan:</b> {occ_txt}
-        </p>
-
+        <h4 style="margin: 0 0 8px 0; color: #1e3a8a;">🏥 {name}</h4>
+        <p style="margin: 4px 0;"><b>📍 Konum:</b> {city} / {district}</p>
+        <p style="margin: 4px 0;"><b>🏠 Kapasite:</b> {cap_txt}</p>
+        <p style="margin: 4px 0;"><b>🐾 Mevcut Hayvan:</b> {occ_txt}</p>
         <p style="margin: 4px 0;">
             <b>⚠️ Risk Skoru:</b> {risk_txt}
-            <span style="color:{risk_color}; font-weight: 600;">
-                ({risk_level})
-            </span>
+            <span style="color:{risk_color}; font-weight: 600;">({risk_level})</span>
         </p>
-
         <p style="margin: 6px 0 0 0; font-size: 11px; color: #666;">
             <b>📊 Kaynak:</b> {portal}
         </p>
@@ -435,15 +337,12 @@ def _build_popup(row: pd.Series) -> str:
 
 
 def _marker_radius(capacity: Any, occupancy: Any) -> int:
-    """Doluluk oranına göre marker boyutu hesaplar."""
-
     radius = 6
 
     if pd.notna(capacity) and pd.notna(occupancy):
         try:
             cap_f = float(capacity)
             occ_f = float(occupancy)
-
             if cap_f > 0:
                 ratio = min(occ_f / cap_f, 2.0)
                 radius = 5 + int(ratio * 8)
@@ -454,8 +353,6 @@ def _marker_radius(capacity: Any, occupancy: Any) -> int:
 
 
 def _heat_weight(risk_score: Any) -> float:
-    """Risk skoruna göre heatmap ağırlığı hesaplar."""
-
     if pd.notna(risk_score):
         try:
             return max(float(risk_score) / 100.0, 0.3)
@@ -466,8 +363,6 @@ def _heat_weight(risk_score: Any) -> float:
 
 
 def _add_marker_layers(m: folium.Map, df: pd.DataFrame | None):
-    """Marker, cluster, kritik marker ve heatmap katmanlarını ekler."""
-
     if df is None or df.empty:
         return
 
@@ -477,21 +372,9 @@ def _add_marker_layers(m: folium.Map, df: pd.DataFrame | None):
     if lat_col not in df.columns or lon_col not in df.columns:
         return
 
-    all_markers = folium.FeatureGroup(
-        name="📍 Tüm Barınaklar",
-        show=True,
-    )
-
-    cluster_group = MarkerCluster(
-        name="🔵 Cluster / Yoğunluk",
-        show=False,
-    )
-
-    critical_markers = folium.FeatureGroup(
-        name="🚨 Kritik Riskli",
-        show=True,
-    )
-
+    all_markers = folium.FeatureGroup(name="📍 Tüm Barınaklar", show=True)
+    cluster_group = MarkerCluster(name="🔵 Cluster / Yoğunluk", show=False)
+    critical_markers = folium.FeatureGroup(name="🚨 Kritik Riskli", show=True)
     heatmap_data: list[list[float]] = []
 
     for _, row in df.iterrows():
@@ -509,12 +392,11 @@ def _add_marker_layers(m: folium.Map, df: pd.DataFrame | None):
 
         capacity = row.get("capacity")
         occupancy = row.get("occupancy")
-
         radius = _marker_radius(capacity, occupancy)
+
         popup_html = _build_popup(row)
         tooltip = _html_escape(row.get("name"))
 
-        # Tüm barınak markerları
         folium.CircleMarker(
             location=[lat, lon],
             radius=radius,
@@ -527,7 +409,6 @@ def _add_marker_layers(m: folium.Map, df: pd.DataFrame | None):
             tooltip=tooltip,
         ).add_to(all_markers)
 
-        # Cluster markerları
         folium.CircleMarker(
             location=[lat, lon],
             radius=radius,
@@ -540,19 +421,14 @@ def _add_marker_layers(m: folium.Map, df: pd.DataFrame | None):
             tooltip=tooltip,
         ).add_to(cluster_group)
 
-        # Kritik risk markerları
         if risk_level == "Kritik":
             folium.Marker(
                 location=[lat, lon],
-                icon=folium.Icon(
-                    color="red",
-                    icon="warning-sign",
-                ),
+                icon=folium.Icon(color="red", icon="warning-sign"),
                 popup=folium.Popup(popup_html, max_width=340),
                 tooltip=f"🚨 KRİTİK: {tooltip}",
             ).add_to(critical_markers)
 
-        # Heatmap verisi
         heatmap_data.append(
             [
                 float(lat),
@@ -582,13 +458,48 @@ def _add_marker_layers(m: folium.Map, df: pd.DataFrame | None):
         heatmap_layer.add_to(m)
 
 
-# ---------------------------------------------------------------------
-# UI yardımcıları
-# ---------------------------------------------------------------------
+def _add_leaflet_control_css(m: folium.Map):
+    css = """
+    <style>
+        .leaflet-top.leaflet-right {
+            z-index: 999999 !important;
+        }
+
+        .leaflet-control-layers {
+            z-index: 999999 !important;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+            font-size: 13px !important;
+            border-radius: 10px !important;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.22) !important;
+        }
+
+        .leaflet-control-layers-expanded {
+            padding: 10px 12px !important;
+            background: white !important;
+            color: #111827 !important;
+            max-height: 460px !important;
+            overflow-y: auto !important;
+        }
+
+        .leaflet-control-layers label {
+            margin-bottom: 5px !important;
+            cursor: pointer !important;
+            white-space: nowrap !important;
+        }
+
+        .leaflet-control-layers-selector {
+            margin-right: 6px !important;
+        }
+
+        .leaflet-control-container {
+            z-index: 999999 !important;
+        }
+    </style>
+    """
+    m.get_root().header.add_child(folium.Element(css))
+
 
 def _add_legend(m: folium.Map):
-    """Sol alt köşeye renk legend'ı ekler."""
-
     legend_html = """
     <div style="
         position: fixed;
@@ -604,25 +515,20 @@ def _add_legend(m: folium.Map):
         line-height: 1.45;
     ">
         <b style="font-size: 14px;">Risk Seviyesi</b><br>
-
         <span style="color:#22c55e;">●</span> Düşük<br>
         <span style="color:#f59e0b;">●</span> Orta<br>
         <span style="color:#ef4444;">●</span> Yüksek<br>
         <span style="color:#991b1b;">●</span> Kritik<br>
         <span style="color:#94a3b8;">●</span> Veri yetersiz<br>
-
         <span style="display:block; color:#666; font-size: 11px; margin-top: 6px;">
             Marker boyutu doluluk oranına göre değişir.
         </span>
     </div>
     """
-
     m.get_root().html.add_child(folium.Element(legend_html))
 
 
 def _add_fullscreen(m: folium.Map):
-    """Fullscreen butonu ekler."""
-
     try:
         from folium.plugins import Fullscreen
 
@@ -636,39 +542,10 @@ def _add_fullscreen(m: folium.Map):
         pass
 
 
-# ---------------------------------------------------------------------
-# Public fonksiyon
-# ---------------------------------------------------------------------
-
 def create_shelter_map(
     df: pd.DataFrame | None,
     default_tile: str = "Stadia OSM Bright",
 ) -> folium.Map:
-    """
-    SmartShelter GIS interaktif harita oluşturur.
-
-    Stadia Maps katmanları:
-    - 🧭 Stadia OSM Bright
-    - 🏞️ Stadia Outdoors
-    - ☀️ Stadia Alidade Smooth
-    - 🌙 Stadia Alidade Dark
-    - 🌇 Stadia Alpenglow
-
-    Diğer katmanlar:
-    - 🗺️ OpenStreetMap
-    - ☀️ CartoDB Positron
-    - 🌙 CartoDB Dark Matter
-    - 🛰️ Esri Uydu Görüntüsü
-    - 🏙️ Esri Sokak Haritası
-    - ⛰️ Esri Topografik
-
-    Marker katmanları:
-    - 📍 Tüm Barınaklar
-    - 🚨 Kritik Riskli
-    - 🔵 Cluster / Yoğunluk
-    - 🔥 Risk Yoğunluk Haritası
-    """
-
     center, zoom = _compute_center(df)
 
     m = folium.Map(
@@ -679,21 +556,16 @@ def create_shelter_map(
         prefer_canvas=True,
     )
 
-    _add_tile_layers(
-        m,
-        default_tile=default_tile,
-    )
-
-    _add_marker_layers(
-        m,
-        df,
-    )
+    _add_tile_layers(m, default_tile=default_tile)
+    _add_marker_layers(m, df)
 
     folium.LayerControl(
         position="topright",
         collapsed=False,
+        autoZIndex=True,
     ).add_to(m)
 
+    _add_leaflet_control_css(m)
     _add_legend(m)
     _add_fullscreen(m)
 
