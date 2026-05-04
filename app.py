@@ -273,37 +273,62 @@ def load_pipeline(mode, rows_per_query, max_resources):
     if mode == "Türkiye Geneli CKAN Taraması":
         with st.spinner("🇹🇷 Türkiye geneli CKAN taranıyor..."):
             try:
-                candidate_df = cached_search_turkiye_ckan_resources(rows_per_query)
+                raw_candidates = cached_search_turkiye_ckan_resources(rows_per_query)
             except Exception as e:
                 st.error(f"CKAN tarama hatası: {e}")
-                candidate_df = pd.DataFrame()
+                raw_candidates = []
 
-        if not candidate_df.empty:
+        # 🔧 List / DataFrame / None — hepsini destekle
+        if isinstance(raw_candidates, pd.DataFrame):
+            candidate_df = raw_candidates.copy()
+            candidate_records = candidate_df.to_dict(orient="records")
+        elif isinstance(raw_candidates, list):
+            candidate_records = raw_candidates
+            candidate_df = pd.DataFrame(raw_candidates) if raw_candidates else pd.DataFrame()
+        else:
+            candidate_df = pd.DataFrame()
+            candidate_records = []
+
+        if len(candidate_df) > 0:
             st.success(f"Türkiye geneli taramada {len(candidate_df)} uygun resource adayı bulundu.")
             with st.expander("🇹🇷 Bulunan Resource Adayları", expanded=False):
                 st.dataframe(candidate_df, use_container_width=True, height=300)
 
-            resources = candidate_df.to_dict(orient="records")
-            resources_tuple = tuple(to_resource_tuple(r) for r in resources)
+            resources_tuple = tuple(to_resource_tuple(r) for r in candidate_records)
 
             with st.spinner(f"Resource'lar yükleniyor (maks {max_resources})..."):
                 try:
-                    df_loaded, loaded_info, _failed = cached_load_multiple_resources(
-                        resources_tuple, max_resources
-                    )
+                    result = cached_load_multiple_resources(resources_tuple, max_resources)
+
+                    # 🔧 Esnek unpack — fonksiyon farklı sayıda değer dönebilir
+                    if isinstance(result, tuple):
+                        if len(result) == 3:
+                            df_loaded, loaded_info, _failed = result
+                        elif len(result) == 2:
+                            df_loaded, loaded_info = result
+                        else:
+                            df_loaded = result[0] if result else pd.DataFrame()
+                            loaded_info = []
+                    elif isinstance(result, pd.DataFrame):
+                        df_loaded = result
+                        loaded_info = []
+                    else:
+                        df_loaded = pd.DataFrame()
+                        loaded_info = []
                 except Exception as e:
                     st.error(f"Resource yükleme hatası: {e}")
                     df_loaded = pd.DataFrame()
+                    loaded_info = []
 
             if not df_loaded.empty:
                 source_name = "Türkiye Geneli CKAN"
-                resource_label = f"{len(loaded_info)} resource"
+                resource_label = f"{len(loaded_info) if loaded_info else len(df_loaded)} resource"
                 df_loaded = normalize_columns(df_loaded)
                 df_loaded = ensure_app_columns(df_loaded)
 
                 # Gerçek envanter analizine uygun mu kontrol et
-                has_capacity = df_loaded["capacity_available"].sum()
-                has_coords = df_loaded["coordinate_valid"].sum()
+                has_capacity = int(df_loaded["capacity_available"].sum())
+                has_coords = int(df_loaded["coordinate_valid"].sum())
 
                 if has_capacity == 0 and has_coords == 0:
                     st.warning(
@@ -312,13 +337,14 @@ def load_pipeline(mode, rows_per_query, max_resources):
                     )
                 else:
                     return df_loaded, candidate_df, loaded_info, source_name, resource_label
+        else:
+            st.warning("CKAN taramasında uygun resource bulunamadı. Demo veriye dönülüyor.")
 
     # Fallback: Demo CSV
     raw = cached_load_local_data(LOCAL_FILE).copy()
     df = normalize_columns(raw)
     df = ensure_app_columns(df)
     return df, candidate_df, loaded_info, source_name, resource_label
-
 
 # =========================================================
 # RENDER BLOCKS
