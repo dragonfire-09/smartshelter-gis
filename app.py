@@ -59,8 +59,6 @@ st.set_page_config(
 
 HISTORY_FILE = Path("data/history/shelter_history.csv")
 RISK_LEVEL_ORDER = ["Düşük", "Orta", "Yüksek", "Kritik", "Veri yetersiz"]
-
-# Performans için harita üst limiti
 MAX_MAP_POINTS = 5000
 
 
@@ -148,6 +146,9 @@ def as_bool_series(series):
     )
 
 
+# =========================================================
+# ENSURE APP COLUMNS — vektörize, NA-safe
+# =========================================================
 def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Eksik sütunları güvenli default'larla doldur ve flag'leri compute et."""
     df = df.copy()
@@ -196,7 +197,6 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     name_clean = clean_str_series(df["name"])
 
-    # Alternatif sütunlardan doldur
     for col in name_alt_cols:
         if col in df.columns:
             mask = name_clean.eq("")
@@ -204,7 +204,6 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
                 alt = clean_str_series(df[col])
                 name_clean = name_clean.where(~mask, alt)
 
-    # Konum + portal'dan doldur
     mask = name_clean.eq("")
     if mask.any():
         district_s = clean_str_series(df["district"])
@@ -228,7 +227,6 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
         )
         name_clean = name_clean.where(~mask, derived)
 
-    # Son çare: koordinat
     mask = name_clean.eq("")
     if mask.any():
         lat_s = pd.to_numeric(df["lat"], errors="coerce")
@@ -244,7 +242,6 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df["name"] = name_clean
 
-    # Bool flag default'ları
     bool_flags = [
         "name_available", "city_available", "capacity_available",
         "occupancy_available", "vet_count_available", "coordinate_valid",
@@ -256,7 +253,6 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df[flag] = as_bool_series(df[flag])
 
-    # Otomatik flag'ler
     df["name_available"] = df["name"].astype(str).str.strip().ne("")
     df["coordinate_valid"] = (
         df["lat"].between(-90, 90, inclusive="both")
@@ -266,7 +262,6 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["occupancy_available"] = df["occupancy"].notna()
     df["risk_eligible"] = df["capacity_available"] & df["occupancy_available"]
 
-    # data_scope sınıflandır (vektörize)
     df["data_scope"] = "metadata_only"
     df.loc[df["coordinate_valid"], "data_scope"] = "location_only"
     df.loc[df["risk_eligible"], "data_scope"] = "capacity_only"
@@ -279,7 +274,6 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
 # CKAN TARAMA — PROGRESS BAR
 # =========================================================
 def search_turkiye_with_progress(rows_per_query):
-    """Türkiye geneli CKAN taraması — canlı progress bar ile."""
     cache_key = f"ckan_search_cache_{rows_per_query}"
     if cache_key in st.session_state:
         cached = st.session_state[cache_key]
@@ -339,7 +333,6 @@ def search_turkiye_with_progress(rows_per_query):
 
 
 def load_resources_with_progress(candidate_records, max_resources):
-    """Resource indirme — canlı progress bar ile."""
     urls = tuple(sorted(r.get("url", "") for r in candidate_records[:max_resources]))
     cache_key = f"resources_loaded_{hash(urls)}_{max_resources}"
 
@@ -453,7 +446,6 @@ def render_sidebar():
 # DATA PIPELINE
 # =========================================================
 def load_pipeline(mode, rows_per_query, max_resources):
-    """Demo CSV her zaman temel; CKAN modunda üstüne ekleniyor."""
     candidate_df = pd.DataFrame()
     loaded_info = []
 
@@ -492,8 +484,8 @@ def load_pipeline(mode, rows_per_query, max_resources):
     has_name_ckan = int(df_loaded["name_available"].sum())
 
     st.info(
-        f"📊 CKAN'dan **{len(df_loaded)}** satır yüklendi "
-        f"({usable_ckan} koordinatlı, {has_cap_ckan} kapasite, {has_name_ckan} isim). "
+        f"📊 CKAN'dan **{len(df_loaded):,}** satır yüklendi "
+        f"({usable_ckan:,} koordinatlı, {has_cap_ckan:,} kapasite, {has_name_ckan:,} isim). "
         f"Demo verisi ({len(demo_df)} kayıt) ile birleştiriliyor."
     )
 
@@ -531,15 +523,15 @@ def render_kpis(df: pd.DataFrame):
     critical = (df["risk_level"].astype(str) == "Kritik").sum()
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Envanter Kaydı", len(df))
-    c2.metric("Risk Hazır", int(risk_ok.sum()))
-    c3.metric("Bilinen Kapasite", known_cap)
-    c4.metric("Bilinen Mevcut", known_occ)
+    c1.metric("Envanter Kaydı", f"{len(df):,}")
+    c2.metric("Risk Hazır", f"{int(risk_ok.sum()):,}")
+    c3.metric("Bilinen Kapasite", f"{known_cap:,}")
+    c4.metric("Bilinen Mevcut", f"{known_occ:,}")
     c5.metric("Ortalama Risk", f"{avg_risk:.1f}" if avg_risk is not None else "—")
-    c6.metric("Geçerli Koordinat", int(coord_ok.sum()))
+    c6.metric("Geçerli Koordinat", f"{int(coord_ok.sum()):,}")
 
     if critical > 0:
-        st.error(f"🚨 {critical} kritik kayıt mevcut.")
+        st.error(f"🚨 {critical:,} kritik kayıt mevcut.")
     else:
         st.success("🟢 Kritik seviyede kayıt yok.")
 
@@ -558,23 +550,21 @@ def render_map(df: pd.DataFrame):
     if map_df.empty:
         st.warning("Harita için geçerli koordinata sahip ve isim alanı dolu kayıt bulunamadı.")
         with st.expander("🔍 Teşhis"):
-            st.write(f"Toplam kayıt: {len(df)}")
-            st.write(f"Geçerli koordinatlı: {int(as_bool_series(df['coordinate_valid']).sum())}")
-            st.write(f"İsim alanı dolu: {int(as_bool_series(df['name_available']).sum())}")
+            st.write(f"Toplam kayıt: {len(df):,}")
+            st.write(f"Geçerli koordinatlı: {int(as_bool_series(df['coordinate_valid']).sum()):,}")
+            st.write(f"İsim alanı dolu: {int(as_bool_series(df['name_available']).sum()):,}")
             if not df.empty:
                 cols = [c for c in ["name", "city", "district", "lat", "lon"] if c in df.columns]
                 if cols:
                     st.dataframe(df[cols].head(10), width="stretch")
         return
 
-    # Performans: çok fazla nokta varsa örnekle
     original_count = len(map_df)
     sampled = False
     if original_count > MAX_MAP_POINTS:
-        # Önce risk_eligible olanları al, sonra rastgele örnekle
         priority = map_df[as_bool_series(map_df["risk_eligible"])]
         rest = map_df[~as_bool_series(map_df["risk_eligible"])]
-        
+
         if len(priority) >= MAX_MAP_POINTS:
             map_df = priority.sample(n=MAX_MAP_POINTS, random_state=42)
         else:
@@ -607,7 +597,6 @@ def render_record_detail(df: pd.DataFrame):
         st.warning("Filtreye uygun kayıt bulunamadı.")
         return
 
-    # Çok fazla kayıt varsa sadece risk-uygun olanları göster
     view_source = df
     if len(df) > 500:
         priority = df[as_bool_series(df["risk_eligible"]) | as_bool_series(df["capacity_available"])]
@@ -616,6 +605,7 @@ def render_record_detail(df: pd.DataFrame):
             st.caption(f"ℹ️ {len(df):,} kayıttan ilk 500 öncelikli kayıt listeleniyor.")
         else:
             view_source = df.head(500)
+            st.caption(f"ℹ️ {len(df):,} kayıttan ilk 500 listeleniyor.")
 
     view = view_source.reset_index(drop=True).copy()
     name_str = view["name"].fillna("Bilinmeyen").astype(str)
@@ -720,7 +710,6 @@ def main():
 
     st.success(f"✅ Aktif kaynak: **{source_name}** · {resource_label}")
 
-    # Risk hesapla
     try:
         df = calculate_risk(df)
         df = create_action_recommendations(df)
@@ -734,10 +723,7 @@ def main():
         before = len(df)
         valid_scopes = ["risk_ready", "capacity_only", "location_only"]
 
-        # Adım 1: scope filtresi
         candidate = df[df["data_scope"].astype(str).isin(valid_scopes)].copy()
-
-        # Adım 2: name_available filtresi (çoğu artık True olmalı)
         with_name = candidate[as_bool_series(candidate["name_available"])]
 
         if not with_name.empty:
@@ -764,6 +750,16 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔎 Filtreler")
 
+    if st.sidebar.button(
+        "🌍 Tüm Türkiye Görünümü",
+        width="stretch",
+        help="Tüm risk seviyelerini varsayılan seçili yapar.",
+    ):
+        for key in list(st.session_state.keys()):
+            if key.startswith("filter_"):
+                del st.session_state[key]
+        st.rerun()
+
     cities = sorted(df["city"].dropna().astype(str).unique().tolist()) if not df.empty else []
     districts = sorted(df["district"].dropna().astype(str).unique().tolist()) if not df.empty else []
     risk_levels = sorted(df["risk_level"].dropna().astype(str).unique().tolist()) if not df.empty else []
@@ -778,12 +774,24 @@ def main():
         st.sidebar.multiselect("İlçe seç", districts, default=districts) if use_district else districts
     )
 
-    if risk_levels:
-        default_risks = [r for r in risk_levels if r != "Veri yetersiz"]
-        if not default_risks:
+    # ---- AKILLI RİSK FİLTRESİ ----
+    if risk_levels and not df.empty:
+        veri_yetersiz_count = (df["risk_level"].astype(str) == "Veri yetersiz").sum()
+        total_count = len(df)
+        veri_yetersiz_ratio = veri_yetersiz_count / max(total_count, 1)
+
+        if veri_yetersiz_ratio > 0.5:
             default_risks = risk_levels
+            st.sidebar.caption(
+                f"ℹ️ Veri kapsamı geniş — tüm risk seviyeleri varsayılan olarak seçili "
+                f"({veri_yetersiz_count:,} kayıt 'Veri yetersiz')."
+            )
+        else:
+            default_risks = [r for r in risk_levels if r != "Veri yetersiz"]
+            if not default_risks:
+                default_risks = risk_levels
     else:
-        default_risks = []
+        default_risks = risk_levels if risk_levels else []
 
     selected_risks = st.sidebar.multiselect(
         "Risk seviyesi", risk_levels, default=default_risks,
@@ -793,7 +801,6 @@ def main():
         st.sidebar.info("ℹ️ Risk filtresi boş — tüm seviyeler gösteriliyor.")
         selected_risks = risk_levels
 
-    # Filtre uygula
     if df.empty:
         filtered = df.copy()
     else:
@@ -803,7 +810,6 @@ def main():
             & df["risk_level"].astype(str).isin(selected_risks)
         ].copy()
 
-    # Render
     render_kpis(filtered)
     st.divider()
 
@@ -825,7 +831,6 @@ def main():
     render_dashboard_tabs(filtered, district_summary, history_df)
 
     with st.expander("🧾 Ham Veri", expanded=False):
-        # 22000+ satırı tek seferde göstermek yavaşlatabilir
         if len(filtered) > 1000:
             st.caption(f"ℹ️ {len(filtered):,} kayıttan ilk 1000 gösteriliyor.")
             st.dataframe(filtered.head(1000), width="stretch")
