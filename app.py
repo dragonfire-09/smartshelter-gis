@@ -192,11 +192,17 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
         "sokak", "cadde",
     ]
 
-    def derive_name(row):
-        # 1. Mevcut name'i kontrol et
-        existing = str(row.get("name", "") or "").strip()
-        if existing and existing.lower() not in ("nan", "none", "<na>", ""):
-            return existing
+    def _safe_str(val):
+    if val is None:
+        return ""
+    if pd.isna(val):     # pd.NA, None, NaN için güvenli
+        return ""
+    s = str(val).strip()
+    if s.lower() in ("nan", "none", "<na>", ""):
+        return ""
+    return s
+
+existing = _safe_str(row.get("name"))
 
         # 2. Alternatif sütunlardan al
         for col in name_alt_cols:
