@@ -84,14 +84,12 @@ def cached_search_turkiye_ckan_resources(rows_per_query):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_load_resource(resource_tuple):
-    """resource_tuple: tuple(sorted(dict.items())) - hashlenebilir."""
     resource = dict(resource_tuple)
     return load_resource(resource)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_load_multiple_resources(resources_tuple, max_resources):
-    """resources_tuple: tuple of tuple(sorted(dict.items())) - hashlenebilir."""
     resources = [dict(items) for items in resources_tuple]
 
     return load_multiple_resources(
@@ -223,6 +221,7 @@ def render_hero():
                 <span class="pill">🧠 Kural Tabanlı AI Analiz</span>
                 <span class="pill">📊 CKAN Açık Veri</span>
                 <span class="pill">🕒 Tarihsel Snapshot</span>
+                <span class="pill">🔒 Strict Mode</span>
             </div>
         </div>
         """,
@@ -239,15 +238,16 @@ def section_header(title: str, caption: str = ""):
 def render_methodology_note():
     st.info(
         """
-        Bu uygulama resmi bir denetim sistemi değildir. Açık veri ve demo veriyle çalışan
+        Bu uygulama resmi bir denetim sistemi değildir. Açık veri tabanlı çalışan
         prototip bir karar destek ekranıdır.
 
-        Sistem Türkiye geneli açık veri kaynaklarını tek havuzda toplar; ancak verileri
+        Sistem; Türkiye geneli açık veri kaynaklarını tek havuzda toplar; ancak verileri
         risk analizi, kapasite verisi, tesis/konum verisi ve operasyonel istatistikler
-        olarak ayırır. Böylece yalnızca kapasite istatistiği veya işlem sayısı içeren
-        kaynaklar risk hesabına karıştırılmaz.
+        olarak ayırır. Yalnızca kapasite istatistiği veya işlem sayısı içeren kaynaklar
+        risk hesabına karıştırılmaz.
 
-        AI Analiz bölümü harici AI API kullanmadan, şeffaf ve kural tabanlı çalışır.
+        **Strict Mode** açıkken, kaynaklarda gerçekten kapasite/mevcut hayvan alanı
+        bulunmayan kayıtlar dashboard'a alınmaz. Tahmini değerlerle veri uydurulmaz.
         """
     )
 
@@ -296,106 +296,69 @@ def as_bool_series(series: pd.Series) -> pd.Series:
 
 
 def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    normalize.py tarafından üretilen kolonları KORUR.
+    Yalnızca eksikse default değer atar; var olan flag'leri ezmez.
+    """
     df = df.copy()
 
     string_defaults = {
-        "name": "Bilinmeyen Kayıt",
-        "city": "Bilinmiyor",
-        "district": "Bilinmiyor",
+        "name": pd.NA,
+        "city": pd.NA,
+        "district": pd.NA,
         "source_portal": "",
         "source_resource": "",
         "source_url": "",
-        "resource_category": "",
-        "data_scope": "",
+        "resource_category": "unknown",
+        "data_scope": "unknown",
         "risk_level": "Veri yetersiz",
-        "recommended_action": "Veri kalitesi artırılmalı ve eksik alanlar tamamlanmalıdır.",
+        "recommended_action": "",
         "risk_explanation": "",
         "data_quality_level": "Bilinmiyor",
         "data_quality_note": "",
         "analytics_exclusion_reason": "",
     }
 
-    numeric_defaults = {
-        "capacity": 0,
-        "occupancy": 0,
-        "vet_count": 0,
-        "sterilization_count": 0,
-        "adoption_count": 0,
-        "occupancy_rate": pd.NA,
-        "animals_per_vet": pd.NA,
-        "risk_score": pd.NA,
-        "data_quality_score": pd.NA,
-        "latitude": pd.NA,
-        "longitude": pd.NA,
-        "relevance_score": 0,
-    }
-
     for col, default in string_defaults.items():
         if col not in df.columns:
             df[col] = default
-        else:
-            df[col] = df[col].fillna(default)
 
-    for col, default in numeric_defaults.items():
-        if col not in df.columns:
-            df[col] = default
-
-        if col not in ["latitude", "longitude"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    for col in [
+    numeric_cols = [
         "capacity",
         "occupancy",
         "vet_count",
         "sterilization_count",
         "adoption_count",
+        "occupancy_rate",
+        "animals_per_vet",
+        "risk_score",
+        "data_quality_score",
+        "latitude",
+        "longitude",
         "relevance_score",
-    ]:
-        df[col] = df[col].fillna(0)
+    ]
 
-    if "capacity_available" not in df.columns:
-        df["capacity_available"] = df["capacity"].fillna(0) > 0
-    else:
-        df["capacity_available"] = as_bool_series(df["capacity_available"])
+    for col in numeric_cols:
+        if col not in df.columns:
+            df[col] = pd.NA
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    if "occupancy_available" not in df.columns:
-        df["occupancy_available"] = df["occupancy"].fillna(0) > 0
-    else:
-        df["occupancy_available"] = as_bool_series(df["occupancy_available"])
+    bool_flags = [
+        "name_available",
+        "city_available",
+        "capacity_available",
+        "occupancy_available",
+        "vet_count_available",
+        "coordinate_valid",
+        "analytics_eligible",
+        "risk_eligible",
+    ]
 
-    if "vet_count_available" not in df.columns:
-        df["vet_count_available"] = df["vet_count"].fillna(0) > 0
-    else:
-        df["vet_count_available"] = as_bool_series(df["vet_count_available"])
-
-    if "coordinate_valid" not in df.columns:
-        lat_ok = pd.to_numeric(df["latitude"], errors="coerce").between(-90, 90)
-        lon_ok = pd.to_numeric(df["longitude"], errors="coerce").between(-180, 180)
-        df["coordinate_valid"] = lat_ok & lon_ok
-    else:
-        df["coordinate_valid"] = as_bool_series(df["coordinate_valid"])
-
-    if "analytics_eligible" not in df.columns:
-        df["analytics_eligible"] = True
-    else:
-        df["analytics_eligible"] = as_bool_series(df["analytics_eligible"])
-
-    if "risk_eligible" not in df.columns:
-        df["risk_eligible"] = df["capacity_available"] & df["occupancy_available"]
-    else:
-        df["risk_eligible"] = as_bool_series(df["risk_eligible"])
-
-    if df["data_scope"].astype(str).eq("").all():
-        df.loc[df["risk_eligible"], "data_scope"] = "risk_ready"
-        df.loc[
-            ~df["risk_eligible"] & df["capacity_available"],
-            "data_scope",
-        ] = "capacity_only"
-        df.loc[
-            ~df["risk_eligible"] & ~df["capacity_available"] & df["coordinate_valid"],
-            "data_scope",
-        ] = "location_only"
-        df.loc[df["data_scope"].astype(str).eq(""), "data_scope"] = "unknown"
+    for flag in bool_flags:
+        if flag not in df.columns:
+            df[flag] = False
+        else:
+            df[flag] = as_bool_series(df[flag])
 
     return df
 
@@ -412,9 +375,7 @@ def load_history_file() -> pd.DataFrame:
 
 def fallback_local(reason: str):
     st.warning(reason)
-
     raw = cached_load_local_data(LOCAL_FILE).copy()
-
     return raw, "Fallback Demo CSV", "Lokal CSV"
 
 
@@ -431,6 +392,7 @@ def render_data_source_status(
     excluded_df,
     failed_resource_count,
     mode,
+    strict_mode,
 ):
     with st.expander("ℹ️ Prototip ve Veri Kaynağı Bilgisi", expanded=False):
         render_methodology_note()
@@ -441,6 +403,7 @@ def render_data_source_status(
             st.write(f"**Aktif veri kaynağı:** {selected_source_name}")
             st.write(f"**Resource:** {selected_resource_label}")
             st.write(f"**Derin CKAN taraması:** {'Açık' if deep_scan else 'Kapalı'}")
+            st.write(f"**Strict Mode:** {'Açık' if strict_mode else 'Kapalı'}")
             st.write("**Tarihsel snapshot:** `data/history/shelter_history.csv`")
 
             if mode == "Türkiye Geneli CKAN Taraması":
@@ -485,32 +448,13 @@ def render_kpis(df: pd.DataFrame):
         st.warning("Filtreye uygun kayıt bulunamadı.")
         return
 
-    capacity_available = (
-        as_bool_series(df["capacity_available"])
-        if "capacity_available" in df.columns
-        else pd.Series([False] * len(df))
-    )
-    occupancy_available = (
-        as_bool_series(df["occupancy_available"])
-        if "occupancy_available" in df.columns
-        else pd.Series([False] * len(df))
-    )
-    risk_eligible = (
-        as_bool_series(df["risk_eligible"])
-        if "risk_eligible" in df.columns
-        else pd.Series([True] * len(df))
-    )
+    capacity_available = as_bool_series(df["capacity_available"])
+    occupancy_available = as_bool_series(df["occupancy_available"])
+    risk_eligible = as_bool_series(df["risk_eligible"])
+    coord_valid = as_bool_series(df["coordinate_valid"])
 
-    known_capacity = (
-        int(df.loc[capacity_available, "capacity"].sum())
-        if "capacity" in df.columns
-        else 0
-    )
-    known_occupancy = (
-        int(df.loc[occupancy_available, "occupancy"].sum())
-        if "occupancy" in df.columns
-        else 0
-    )
+    known_capacity = int(df.loc[capacity_available, "capacity"].fillna(0).sum())
+    known_occupancy = int(df.loc[occupancy_available, "occupancy"].fillna(0).sum())
 
     risk_df = df[risk_eligible].copy()
 
@@ -519,23 +463,15 @@ def render_kpis(df: pd.DataFrame):
         if len(risk_df) and "risk_score" in risk_df.columns
         else pd.NA
     )
+
     critical_count = (
         len(risk_df[risk_df["risk_level"].astype(str) == "Kritik"])
         if "risk_level" in risk_df.columns
         else 0
     )
 
-    capacity_only_count = (
-        len(df[df["data_scope"].astype(str).eq("capacity_only")])
-        if "data_scope" in df.columns
-        else 0
-    )
-
-    location_only_count = (
-        len(df[df["data_scope"].astype(str).eq("location_only")])
-        if "data_scope" in df.columns
-        else 0
-    )
+    capacity_only_count = len(df[df["data_scope"].astype(str).eq("capacity_only")])
+    location_only_count = len(df[df["data_scope"].astype(str).eq("location_only")])
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
 
@@ -550,17 +486,14 @@ def render_kpis(df: pd.DataFrame):
 
     c7.metric("Bilinen Mevcut Hayvan", known_occupancy)
     c8.metric("Kritik Kayıt", critical_count)
-    c9.metric(
-        "Koordinatı Geçerli",
-        int(as_bool_series(df["coordinate_valid"]).sum())
-        if "coordinate_valid" in df.columns
-        else 0,
-    )
+    c9.metric("Koordinatı Geçerli", int(coord_valid.sum()))
 
     if critical_count > 0:
         st.error(f"🔴 {critical_count} kayıt kritik risk seviyesinde.")
+    elif len(risk_df) == 0:
+        st.info("ℹ️ Risk hesaplamak için yeterli veri içeren kayıt bulunmuyor.")
     else:
-        st.success("🟢 Kritik seviyede kayıt bulunmuyor veya risk için yeterli veri yok.")
+        st.success("🟢 Kritik seviyede kayıt yok.")
 
 
 def render_record_detail(df: pd.DataFrame):
@@ -575,12 +508,16 @@ def render_record_detail(df: pd.DataFrame):
 
     view = df.reset_index(drop=True).copy()
 
+    name_str = view["name"].fillna("Bilinmeyen Kayıt").astype(str)
+    city_str = view["city"].fillna("Bilinmiyor").astype(str)
+    district_str = view["district"].fillna("Bilinmiyor").astype(str)
+
     view["record_label"] = (
-        view["name"].astype(str)
+        name_str
         + " · "
-        + view["city"].astype(str)
+        + city_str
         + " / "
-        + view["district"].astype(str)
+        + district_str
         + " · #"
         + view.index.astype(str)
     )
@@ -595,9 +532,9 @@ def render_record_detail(df: pd.DataFrame):
     item = view.loc[selected_idx]
 
     st.markdown("##### Temel Bilgiler")
-    st.write(f"**Ad:** {item.get('name', '')}")
-    st.write(f"**İl:** {item.get('city', '')}")
-    st.write(f"**İlçe:** {item.get('district', '')}")
+    st.write(f"**Ad:** {item.get('name') if pd.notna(item.get('name')) else 'Veri yok'}")
+    st.write(f"**İl:** {item.get('city') if pd.notna(item.get('city')) else 'Veri yok'}")
+    st.write(f"**İlçe:** {item.get('district') if pd.notna(item.get('district')) else 'Veri yok'}")
     st.write(f"**Veri Kapsamı:** `{item.get('data_scope', '')}`")
 
     if str(item.get("source_portal", "")).strip():
@@ -651,7 +588,7 @@ def render_record_detail(df: pd.DataFrame):
         st.info("ℹ️ Risk için yeterli veri yok")
 
     st.markdown("##### Önerilen Aksiyon")
-    st.write(item.get("recommended_action", ""))
+    st.write(item.get("recommended_action", "") or "—")
 
     if str(item.get("risk_explanation", "")).strip():
         st.markdown("##### AI Risk Açıklaması")
@@ -678,26 +615,14 @@ def render_data_quality_summary(df: pd.DataFrame):
         st.warning("Veri bulunamadı.")
         return
 
-    coord_missing = (
-        len(df[~as_bool_series(df["coordinate_valid"])])
-        if "coordinate_valid" in df.columns
-        else 0
-    )
+    coord_missing = len(df[~as_bool_series(df["coordinate_valid"])])
     low_quality = (
         len(df[df["data_quality_level"].astype(str) == "Düşük"])
         if "data_quality_level" in df.columns
         else 0
     )
-    capacity_missing = (
-        len(df[~as_bool_series(df["capacity_available"])])
-        if "capacity_available" in df.columns
-        else 0
-    )
-    occupancy_missing = (
-        len(df[~as_bool_series(df["occupancy_available"])])
-        if "occupancy_available" in df.columns
-        else 0
-    )
+    capacity_missing = len(df[~as_bool_series(df["capacity_available"])])
+    occupancy_missing = len(df[~as_bool_series(df["occupancy_available"])])
 
     c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -708,10 +633,10 @@ def render_data_quality_summary(df: pd.DataFrame):
     c5.metric("Mevcut Hayvan Eksik", occupancy_missing)
 
 
-def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.DataFrame):
+def render_history_analytics(history_df, history_summary_df):
     section_header(
         "🕒 Geçmiş Analitik ve Tarihsel Karşılaştırma",
-        "Farklı snapshot tarihleri arasında kapasite, doluluk ve risk değişimini karşılaştırır.",
+        "Snapshot tarihleri arasında kapasite, doluluk ve risk değişimi.",
     )
 
     if history_df is None or history_df.empty:
@@ -729,7 +654,6 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
             f"Şu anda yalnızca bir snapshot tarihi var: {available_dates[0]}. "
             "Karşılaştırma için farklı günlerde tekrar snapshot alınması gerekir."
         )
-
         safe_plotly(chart_history_trend, history_summary_df)
         st.dataframe(history_summary_df, use_container_width=True, hide_index=True)
         return
@@ -784,25 +708,21 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
             int(summary_compare["record_count"]["new"]),
             int(summary_compare["record_count"]["delta"]),
         )
-
         k2.metric(
             "Toplam Kapasite",
             int(summary_compare["total_capacity"]["new"]),
             int(summary_compare["total_capacity"]["delta"]),
         )
-
         k3.metric(
             "Mevcut Hayvan",
             int(summary_compare["total_occupancy"]["new"]),
             int(summary_compare["total_occupancy"]["delta"]),
         )
-
         k4.metric(
             "Ortalama Risk",
             f"{summary_compare['avg_risk']['new']:.1f}",
             f"{summary_compare['avg_risk']['delta']:.1f}",
         )
-
         k5.metric(
             "Kritik Kayıt",
             int(summary_compare["critical_count"]["new"]),
@@ -869,7 +789,7 @@ def render_history_analytics(history_df: pd.DataFrame, history_summary_df: pd.Da
 def render_ai_analysis(filtered_df, history_summary_df, anomalies_df):
     section_header(
         "🤖 AI Analiz ve Karar Destek",
-        "Harici AI API kullanmadan, kural tabanlı yönetici özeti, anomali tespiti ve senaryo simülasyonu üretir.",
+        "Harici AI API kullanmadan, kural tabanlı yönetici özeti, anomali tespiti ve senaryo simülasyonu.",
     )
 
     try:
@@ -973,7 +893,7 @@ def render_source_management(
 ):
     section_header(
         "🧩 Kaynak Yönetimi ve Veri Ayrıştırma",
-        "Bulunan, yüklenen ve ana analitikten ayrıştırılan kaynakların izlenmesi.",
+        "Bulunan, yüklenen ve ana analitikten ayrıştırılan kaynaklar.",
     )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1062,7 +982,7 @@ def render_report_downloads(
 ):
     section_header(
         "📥 Rapor İndirme",
-        "Filtrelenmiş veri, Excel raporu, anomaliler, dışlanan kayıtlar ve tarihsel snapshot dosyaları.",
+        "Filtrelenmiş veri, Excel, anomali, dışlanan kayıt ve tarihsel snapshot dosyaları.",
     )
 
     if df.empty:
@@ -1284,7 +1204,7 @@ elif mode == "Türkiye Geneli CKAN Taraması":
         step=1,
     )
 
-        auto_load = st.sidebar.checkbox(
+    auto_load = st.sidebar.checkbox(
         "Bulunan uygun kaynakları otomatik içeri al",
         value=True,
     )
@@ -1342,7 +1262,6 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                     r for r in resources
                     if r.get("resource_category") in [
                         "shelter_facility",
-                        "general_animal",
                         "capacity",
                     ]
                 ]
@@ -1455,6 +1374,22 @@ if raw_df.empty:
 
 
 # ---------------------------------------------------------
+# Strict Mode
+# ---------------------------------------------------------
+st.sidebar.divider()
+st.sidebar.header("🔒 Veri Kalitesi Modu")
+
+strict_mode = st.sidebar.toggle(
+    "Strict Mode (Sadece Gerçek Veri)",
+    value=True,
+    help=(
+        "Açıkken: kaynakta gerçekten kapasite ve mevcut hayvan alanı bulunan kayıtlar "
+        "dashboard'a alınır. Tahmini/uydurma değer kullanılmaz."
+    ),
+)
+
+
+# ---------------------------------------------------------
 # Normalize + Eligibility
 # ---------------------------------------------------------
 try:
@@ -1475,9 +1410,33 @@ if "analytics_eligible" in df_all_loaded.columns:
 else:
     df = df_all_loaded.copy()
 
+
+# ---------------------------------------------------------
+# Strict Mode Filter
+# ---------------------------------------------------------
+if strict_mode and not df.empty:
+    before_count = len(df)
+
+    df = df[
+        df["data_scope"].astype(str).isin(["risk_ready", "capacity_only", "location_only"])
+    ].copy()
+
+    df = df[
+        df["name_available"].fillna(False).astype(bool)
+    ].copy()
+
+    after_count = len(df)
+    removed = before_count - after_count
+
+    if removed > 0:
+        st.sidebar.success(
+            f"Strict Mode: {removed} kayıt fabrikasyon riski nedeniyle çıkarıldı."
+        )
+
+
 if df.empty:
     st.warning(
-        "Yüklenen kaynaklar ana envanter/analitik ekranı için uygun görünmüyor. "
+        "Yüklenen kaynaklar gerçek envanter analitiği için uygun görünmüyor. "
         "Lokal demo veriye dönülüyor."
     )
 
@@ -1497,10 +1456,6 @@ if df.empty:
 try:
     df = calculate_risk(df)
     df = ensure_app_columns(df)
-
-    if "risk_eligible" in df.columns:
-        not_risk_ready = ~as_bool_series(df["risk_eligible"])
-        df.loc[not_risk_ready, "risk_level"] = "Veri yetersiz"
 
     df = create_action_recommendations(df)
     df = ensure_app_columns(df)
@@ -1624,8 +1579,8 @@ selected_scopes = st.sidebar.multiselect(
 )
 
 filtered_df = df[
-    (df["city"].astype(str).isin(selected_cities))
-    & (df["district"].astype(str).isin(selected_districts))
+    (df["city"].fillna("Bilinmiyor").astype(str).isin(selected_cities + ["Bilinmiyor"]))
+    & (df["district"].fillna("Bilinmiyor").astype(str).isin(selected_districts + ["Bilinmiyor"]))
     & (df["risk_level"].astype(str).isin(selected_risks))
     & (df["data_scope"].astype(str).isin(selected_scopes))
 ].copy()
@@ -1659,6 +1614,7 @@ render_data_source_status(
     excluded_df=excluded_df,
     failed_resource_count=failed_resource_count,
     mode=mode,
+    strict_mode=strict_mode,
 )
 
 section_header(
@@ -1679,20 +1635,20 @@ left, right = st.columns([2.25, 1], gap="large")
 with left:
     section_header(
         "📍 GIS Haritası",
-        "Koordinatı geçerli kayıtlar risk durumuna göre harita üzerinde gösterilir.",
+        "Koordinatı geçerli ve isim alanı dolu kayıtlar risk durumuna göre haritada gösterilir.",
     )
 
     if "coordinate_valid" in filtered_df.columns:
         map_df = filtered_df[
             as_bool_series(filtered_df["coordinate_valid"])
+            & filtered_df["name_available"].fillna(False).astype(bool)
         ].copy()
     else:
         map_df = pd.DataFrame()
 
     if map_df.empty:
         st.warning(
-            "Harita için geçerli koordinata sahip kayıt bulunamadı. "
-            "Türkiye geneli kaynakların çoğunda koordinat alanı olmayabilir."
+            "Harita için geçerli koordinata sahip ve isim alanı dolu kayıt bulunamadı."
         )
     else:
         try:
@@ -1748,10 +1704,17 @@ with tab1:
         "Risk analizine uygun kayıtlar için önceliklendirme ve operasyonel aksiyon listesi.",
     )
 
-    if filtered_df.empty:
-        st.warning("Filtreye uygun kayıt bulunamadı.")
+    risk_view = filtered_df[
+        as_bool_series(filtered_df["risk_eligible"])
+    ].copy()
+
+    if risk_view.empty:
+        st.warning(
+            "Risk analizine uygun kayıt bulunamadı. Strict Mode kapatılabilir veya "
+            "kaynaklarda kapasite/mevcut hayvan alanlarının bulunması gerekir."
+        )
     else:
-        safe_plotly(chart_risk_score, filtered_df)
+        safe_plotly(chart_risk_score, risk_view)
 
         st.markdown("#### Operasyonel Öncelik Listesi")
 
@@ -1762,7 +1725,6 @@ with tab1:
             "source_portal",
             "resource_category",
             "data_scope",
-            "risk_eligible",
             "risk_level",
             "risk_score",
             "occupancy_rate",
@@ -1772,15 +1734,11 @@ with tab1:
             "risk_explanation",
         ]
 
-        priority_cols = [c for c in priority_cols if c in filtered_df.columns]
-
-        sort_col = (
-            "risk_score" if "risk_score" in filtered_df.columns else priority_cols[0]
-        )
+        priority_cols = [c for c in priority_cols if c in risk_view.columns]
 
         st.dataframe(
-            filtered_df.sort_values(
-                sort_col,
+            risk_view.sort_values(
+                "risk_score",
                 ascending=False,
                 na_position="last",
             )[priority_cols],
@@ -1795,13 +1753,17 @@ with tab1:
 with tab2:
     section_header(
         "🏠 Doluluk ve Kapasite",
-        "Bilinen kapasite ve mevcut hayvan sayısı üzerinden doluluk baskısının izlenmesi.",
+        "Bilinen kapasite ve mevcut hayvan sayısı üzerinden doluluk baskısı.",
     )
 
-    if filtered_df.empty:
-        st.warning("Filtreye uygun kayıt bulunamadı.")
+    occ_view = filtered_df[
+        as_bool_series(filtered_df["capacity_available"])
+    ].copy()
+
+    if occ_view.empty:
+        st.warning("Kapasite verisi içeren kayıt bulunamadı.")
     else:
-        safe_plotly(chart_occupancy_rate, filtered_df)
+        safe_plotly(chart_occupancy_rate, occ_view)
 
         st.markdown("#### Doluluk Detay Tablosu")
 
@@ -1819,10 +1781,10 @@ with tab2:
             "source_portal",
         ]
 
-        occupancy_cols = [c for c in occupancy_cols if c in filtered_df.columns]
+        occupancy_cols = [c for c in occupancy_cols if c in occ_view.columns]
 
         st.dataframe(
-            filtered_df.sort_values(
+            occ_view.sort_values(
                 "occupancy_rate",
                 ascending=False,
                 na_position="last",
@@ -2031,18 +1993,25 @@ with tab10:
 
         Türkiye geneli açık veri portallarında **hayvan**, **veteriner**, **barınak**,
         **bakımevi** gibi ifadeler içeren çok sayıda farklı veri seti bulunabilir.
-        Bu veri setlerinin tamamı doğrudan risk analizi için uygun değildir.
+        Bunların büyük kısmı doğrudan risk analizi için uygun değildir
+        (örn. vektör/haşere ilaçlama, sağlık kurum listesi, evcil hayvan istatistikleri).
 
         Bu nedenle sistem kayıtları şu veri kapsamlarına ayırır:
 
-        - **risk_ready:** Kapasite, mevcut hayvan ve operasyonel alanları yeterli olan kayıtlar
-        - **capacity_only:** Kapasite veya tesis bilgisi var ama risk için eksik veri bulunan kayıtlar
+        - **risk_ready:** Kapasite, mevcut hayvan ve isim alanları yeterli olan kayıtlar
+        - **capacity_only:** Kapasite/tesis bilgisi var ama risk için eksik veri
         - **location_only:** Konum/envanter bilgisi olan ancak operasyonel metrikleri eksik kayıtlar
         - **operation_stats:** İşlem sayısı, yıllık istatistik, denetim gibi operasyonel tablolar
         - **unknown:** Sınıflandırılamayan veya yetersiz kayıtlar
 
         Risk dashboard'u yalnızca uygun kayıtları risk hesabında kullanır.
         Eksik veya kapsam dışı kaynaklar veri yönetimi ve kalite sekmelerinde ayrıca gösterilir.
+
+        #### Strict Mode
+
+        Strict Mode açıkken, kaynaklarda gerçekten kapasite/mevcut hayvan alanı bulunmayan kayıtlar
+        dashboard'a alınmaz. Sistem hiçbir alanı tahminle doldurmaz; eksik alanlar açıkça
+        "Veri yok" olarak gösterilir.
 
         #### AI Destekli Karar Destek Yaklaşımı
 
@@ -2085,7 +2054,7 @@ with tab10:
 
 
 st.info(
-    "Canlı API erişimi başarısız olursa sistem otomatik olarak lokal stabil CSV verisine döner. "
+    "Strict Mode açıkken sistem yalnızca kaynaklarda gerçekten yer alan operasyonel alanlara dayanır. "
     "Türkiye geneli taramada farklı kapsamlı kaynaklar ayrıştırılır; risk hesabına yalnızca uygun kayıtlar dahil edilir. "
     "Snapshot kaydı sidebar üzerinden kontrollü şekilde yapılır."
 )
