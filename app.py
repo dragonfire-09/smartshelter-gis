@@ -192,11 +192,13 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
         "sokak", "cadde",
     ]
 
-    def _safe_str(val):
+ def _safe_str(val):
     if val is None:
         return ""
-    if pd.isna(val):     # pd.NA, None, NaN için güvenli
+    if pd.isna(val):    
         return ""
+ 
+
     s = str(val).strip()
     if s.lower() in ("nan", "none", "<na>", ""):
         return ""
