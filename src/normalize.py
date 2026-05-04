@@ -2,14 +2,7 @@ import re
 import pandas as pd
 
 
-# ---------------------------------------------------------
-# Slug / Canonical Key
-# ---------------------------------------------------------
 def slugify_column(col: str) -> str:
-    """
-    Bir kolon adını normalize edilmiş slug formatına dönüştürür.
-    Diğer modüller (history.py vb.) bu fonksiyonu import edebilir.
-    """
     if not isinstance(col, str):
         return ""
 
@@ -37,9 +30,6 @@ def _canonical_key(col: str) -> str:
     return slugify_column(col)
 
 
-# ---------------------------------------------------------
-# Column synonyms
-# ---------------------------------------------------------
 COLUMN_ALIASES = {
     "name": [
         "name", "ad", "adi", "ad_", "merkez_adi", "tesis_adi",
@@ -76,7 +66,6 @@ COLUMN_ALIASES = {
 
 
 def _detect_columns(df: pd.DataFrame) -> dict:
-    """Var olan kolonları hedef alanlara map'le. Yoksa atlanır."""
     mapping = {}
     available = {_canonical_key(c): c for c in df.columns}
 
@@ -91,7 +80,6 @@ def _detect_columns(df: pd.DataFrame) -> dict:
 
 
 def _classify_resource_category(row) -> str:
-    """Resource adı / paket adından kaba kategori tahmini."""
     parts = " ".join(
         str(row.get(c, "")) for c in ["name", "package", "matched_query", "source_resource"]
     ).lower()
@@ -129,14 +117,7 @@ def _classify_resource_category(row) -> str:
     return "unknown"
 
 
-# ---------------------------------------------------------
-# Main
-# ---------------------------------------------------------
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Kaynaktaki kolonları hedef şemaya map'ler.
-    EKSİK ALANLARI ASLA TAHMİNLE DOLDURMAZ — boş bırakır.
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
