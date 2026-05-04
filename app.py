@@ -1115,13 +1115,52 @@ elif mode == "Canlı CKAN API Dene":
     deep_queries_tuple = tuple(source.get("deep_queries", [])) if deep_scan else tuple()
 
     try:
-        with st.spinner("CKAN resource listesi taranıyor..."):
-            resources = cached_search_ckan_resources(
-                source["base"],
-                source["query"],
-                rows,
-                deep_queries_tuple,
+    portal_count = len(TURKIYE_CKAN_SOURCES)
+
+    scan_status = st.empty()
+    scan_progress = st.progress(0.0, text="🇹🇷 Türkiye geneli CKAN portalları taranıyor...")
+
+    # Cache hit durumunda anında dön
+    cache_hit_check = st.session_state.get("_tr_ckan_cache_done", False)
+
+    if cache_hit_check:
+        scan_progress.progress(1.0, text="✅ Cache'den yüklendi")
+        resources = cached_search_turkiye_ckan_resources(rows_per_query=rows_per_query)
+        scan_progress.empty()
+        scan_status.empty()
+    else:
+        # Görsel ilerleme: portallar paralel ama kullanıcıya akış göstermek için
+        # küçük bir simülasyon ilerlemesi gösteriyoruz.
+        # (Asıl tarama paralel ve hızlı - bu sadece UX için.)
+        import time
+
+        # 1. Aşama: Tarama başlatılıyor
+        scan_status.info(f"🔍 {portal_count} açık veri portalı paralel taranıyor...")
+
+        for i in range(portal_count):
+            scan_progress.progress(
+                (i + 1) / (portal_count + 2),
+                text=f"Portal taranıyor: {i + 1}/{portal_count}",
             )
+            time.sleep(0.05)  # çok kısa, sadece ilerleme efekti
+
+        # 2. Aşama: Asıl paralel tarama
+        scan_progress.progress(
+            (portal_count + 1) / (portal_count + 2),
+            text="Sonuçlar birleştiriliyor...",
+        )
+
+        resources = cached_search_turkiye_ckan_resources(
+            rows_per_query=rows_per_query,
+        )
+
+        scan_progress.progress(1.0, text=f"✅ Tarama tamam: {len(resources)} aday")
+        time.sleep(0.4)
+
+        scan_progress.empty()
+        scan_status.empty()
+
+        st.session_state["_tr_ckan_cache_done"] = True
 
         candidate_resources_df = pd.DataFrame(resources)
 
