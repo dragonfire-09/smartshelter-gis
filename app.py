@@ -60,6 +60,9 @@ st.set_page_config(
 HISTORY_FILE = Path("data/history/shelter_history.csv")
 RISK_LEVEL_ORDER = ["Düşük", "Orta", "Yüksek", "Kritik", "Veri yetersiz"]
 
+# Performans için harita üst limiti
+MAX_MAP_POINTS = 5000
+
 
 # =========================================================
 # CACHED LOADERS
@@ -67,18 +70,6 @@ RISK_LEVEL_ORDER = ["Düşük", "Orta", "Yüksek", "Kritik", "Veri yetersiz"]
 @st.cache_data(show_spinner=False)
 def cached_load_local_data(path):
     return load_local_data(path)
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def cached_search_turkiye_ckan_resources(rows_per_query):
-    """Cache'li, progress bar OLMADAN tarama (fallback için)."""
-    return search_turkiye_ckan_resources(rows_per_query=rows_per_query)
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def cached_load_multiple_resources(resources_tuple, max_resources):
-    resources = [dict(items) for items in resources_tuple]
-    return load_multiple_resources(resources, max_resources=max_resources)
 
 
 def to_resource_tuple(resource: dict) -> tuple:
@@ -112,10 +103,6 @@ def inject_css():
         }
         .section-title { font-size: 1.3rem; font-weight: 600; margin-top: 1rem; }
         .section-caption { color: #94a3b8; font-size: 0.9rem; margin-bottom: 0.8rem; }
-        .progress-card {
-            background: #f1f5f9; border-left: 4px solid #3b82f6;
-            padding: 0.8rem 1rem; border-radius: 8px; margin: 0.5rem 0;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -162,7 +149,10 @@ def as_bool_series(series):
 
 
 def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Eksik sütunları güvenli default'larla doldur ve flag'leri compute et."""
+    """Eksik sütunları güvenli default'larla doldur ve flag'leri compute et.
+    
+    İsim akıllı türetme: name boşsa, diğer alanlardan otomatik üretir.
+    """
     df = df.copy()
 
     string_defaults = {
@@ -193,6 +183,57 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df["lon"].isna().all() and not df["longitude"].isna().all():
         df["lon"] = df["longitude"]
 
+    # ---- 🆕 İSİM AKILLI TÜRETME ----
+    name_alt_cols = [
+        "adi", "adı", "ad", "tesis_adi", "tesis_adı",
+        "kurum_adi", "kurum_adı", "merkez_adi", "merkez_adı",
+        "title", "isim", "barinak_adi", "barınak_adı",
+        "label", "mahalle", "mahalle_adi", "mahalle_adı",
+        "sokak", "cadde",
+    ]
+
+    def derive_name(row):
+        # 1. Mevcut name'i kontrol et
+        existing = str(row.get("name", "") or "").strip()
+        if existing and existing.lower() not in ("nan", "none", "<na>", ""):
+            return existing
+
+        # 2. Alternatif sütunlardan al
+        for col in name_alt_cols:
+            val = row.get(col)
+            if val is not None:
+                val_str = str(val).strip()
+                if val_str and val_str.lower() not in ("nan", "none", "<na>", ""):
+                    return val_str
+
+        # 3. Konum + portal
+        district = str(row.get("district", "") or "").strip()
+        city = str(row.get("city", "") or "").strip()
+        portal = str(row.get("source_portal", "") or "").strip()
+
+        loc = " / ".join([p for p in [district, city] if p and p.lower() not in ("nan", "none", "")])
+
+        if loc and portal:
+            return f"{portal} · {loc}"
+        if loc:
+            return loc
+        if portal:
+            return f"{portal} kaydı"
+
+        # 4. Son çare: koordinat
+        lat = row.get("lat")
+        lon = row.get("lon")
+        try:
+            if pd.notna(lat) and pd.notna(lon):
+                return f"Kayıt @ {float(lat):.3f}, {float(lon):.3f}"
+        except Exception:
+            pass
+
+        return ""
+
+    df["name"] = df.apply(derive_name, axis=1)
+
+    # Bool flag default'ları
     bool_flags = [
         "name_available", "city_available", "capacity_available",
         "occupancy_available", "vet_count_available", "coordinate_valid",
@@ -233,74 +274,51 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# CKAN TARAMA — PROGRESS BAR İLE
+# CKAN TARAMA — PROGRESS BAR
 # =========================================================
 def search_turkiye_with_progress(rows_per_query):
-    """Türkiye geneli CKAN taramasını canlı progress bar ile yapar."""
-    # Session state ile cache
+    """Türkiye geneli CKAN taraması — canlı progress bar ile."""
     cache_key = f"ckan_search_cache_{rows_per_query}"
     if cache_key in st.session_state:
-        return st.session_state[cache_key]
+        cached = st.session_state[cache_key]
+        st.success(f"⚡ Önbellek kullanıldı · {len(cached)} resource (yeniden tarama yok)")
+        return cached
 
-    # UI elementleri
-    progress_container = st.container()
-    with progress_container:
-        st.markdown("#### 🇹🇷 Türkiye Geneli CKAN Taraması")
-        progress_bar = st.progress(0.0)
-        status_text = st.empty()
-        portal_count_text = st.empty()
+    total_portals = len(TURKIYE_CKAN_SOURCES)
 
-    total_portals = len(TURKIYE_CKAN_SOURCES) if TURKIYE_CKAN_SOURCES else 1
-    found_resources = []
-    portal_progress = {"done": 0, "found": 0}
+    st.markdown("#### 🇹🇷 Türkiye Geneli CKAN Taraması")
+    info_box = st.empty()
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
 
-    def progress_callback(portal_name=None, current=0, total=total_portals, found=0, message=""):
-        """data_loader'dan çağrılan callback."""
+    info_box.info(f"🔄 {total_portals} portal paralel olarak taranıyor...")
+
+    portal_log = []
+
+    def on_portal_done(portal_name, current, total):
         try:
             ratio = min(max(current / max(total, 1), 0.0), 1.0)
             progress_bar.progress(ratio)
-            
-            label = portal_name or "Portal"
-            if message:
-                status_text.info(f"🔍 **{label}** · {message}")
-            else:
-                status_text.info(f"🔍 Taranan: **{label}** ({current}/{total})")
-            
-            portal_count_text.caption(
-                f"📊 İlerleme: {current}/{total} portal · {found} resource bulundu"
+            portal_log.append(f"✅ {portal_name}")
+            recent = portal_log[-5:]
+            status_text.markdown(
+                f"**{current}/{total}** portal tamamlandı · Son tamamlananlar:\n\n"
+                + "\n".join(f"- {p}" for p in recent)
             )
         except Exception:
             pass
 
     try:
-        # Önce progress bar'lı versiyonu dene
         result = search_turkiye_ckan_resources_with_progress(
             rows_per_query=rows_per_query,
-            progress_callback=progress_callback,
+            on_portal_done=on_portal_done,
         )
-    except TypeError:
-        # Eski imza — callback parametresi yok
-        try:
-            result = search_turkiye_ckan_resources_with_progress(rows_per_query=rows_per_query)
-        except Exception:
-            result = None
     except Exception as e:
         status_text.error(f"❌ Tarama hatası: {e}")
-        result = None
+        result = []
 
-    # Fallback: progress'siz versiyon
-    if result is None:
-        status_text.warning("⏳ Progress destekli tarama başarısız, klasik moda geçiliyor...")
-        try:
-            result = cached_search_turkiye_ckan_resources(rows_per_query)
-        except Exception as e:
-            status_text.error(f"❌ CKAN tarama hatası: {e}")
-            result = []
-
-    # Bitiş animasyonu
     progress_bar.progress(1.0)
 
-    # Result'u DataFrame'e çevir
     if isinstance(result, pd.DataFrame):
         df = result.copy()
     elif isinstance(result, list):
@@ -308,12 +326,83 @@ def search_turkiye_with_progress(rows_per_query):
     else:
         df = pd.DataFrame()
 
-    status_text.success(f"✅ Tarama tamamlandı: **{len(df)}** uygun resource bulundu.")
-    portal_count_text.empty()
+    info_box.success(
+        f"✅ Tarama tamamlandı: **{len(df)}** uygun resource bulundu "
+        f"({total_portals} portal tarandı)"
+    )
+    status_text.empty()
 
-    # Cache'le
     st.session_state[cache_key] = df
     return df
+
+
+def load_resources_with_progress(candidate_records, max_resources):
+    """Resource indirme — canlı progress bar ile."""
+    urls = tuple(sorted(r.get("url", "") for r in candidate_records[:max_resources]))
+    cache_key = f"resources_loaded_{hash(urls)}_{max_resources}"
+
+    if cache_key in st.session_state:
+        cached = st.session_state[cache_key]
+        st.success(f"⚡ Önbellek kullanıldı · {len(cached[1])} resource yüklü")
+        return cached
+
+    total = min(max_resources, len(candidate_records))
+
+    st.markdown("#### 📥 Resource'lar İndiriliyor")
+    info_box = st.empty()
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+
+    info_box.info(f"🔄 {total} resource paralel olarak indiriliyor...")
+
+    download_log = []
+
+    def on_resource_done(resource, done, total_n):
+        try:
+            ratio = min(max(done / max(total_n, 1), 0.0), 1.0)
+            progress_bar.progress(ratio)
+            portal = resource.get("source_portal", "?")
+            name = resource.get("name", "?")[:50]
+            fmt = str(resource.get("format", "")).upper()
+            download_log.append(f"📦 [{portal}] {name} ({fmt})")
+            recent = download_log[-5:]
+            status_text.markdown(
+                f"**{done}/{total_n}** resource indirildi · Son tamamlananlar:\n\n"
+                + "\n".join(f"- {p}" for p in recent)
+            )
+        except Exception:
+            pass
+
+    try:
+        result = load_multiple_resources(
+            candidate_records,
+            max_resources=max_resources,
+            on_resource_done=on_resource_done,
+        )
+        if isinstance(result, tuple) and len(result) == 3:
+            df_loaded, loaded_info, failed = result
+        elif isinstance(result, tuple) and len(result) == 2:
+            df_loaded, loaded_info = result
+            failed = []
+        else:
+            df_loaded = result if isinstance(result, pd.DataFrame) else pd.DataFrame()
+            loaded_info = []
+            failed = []
+    except Exception as e:
+        info_box.error(f"❌ Resource yükleme hatası: {e}")
+        df_loaded = pd.DataFrame()
+        loaded_info = []
+        failed = []
+
+    progress_bar.progress(1.0)
+    info_box.success(
+        f"✅ İndirme tamamlandı: **{len(loaded_info)}** resource yüklü, "
+        f"**{len(failed)}** başarısız · **{len(df_loaded)}** satır"
+    )
+    status_text.empty()
+
+    st.session_state[cache_key] = (df_loaded, loaded_info, failed)
+    return df_loaded, loaded_info, failed
 
 
 # =========================================================
@@ -324,8 +413,10 @@ def render_sidebar():
 
     if st.sidebar.button("🔄 Cache Temizle", width="stretch"):
         st.cache_data.clear()
-        # Session state'deki tarama cache'lerini de temizle
-        keys_to_remove = [k for k in st.session_state.keys() if k.startswith("ckan_search_cache_")]
+        keys_to_remove = [
+            k for k in st.session_state.keys()
+            if k.startswith("ckan_search_cache_") or k.startswith("resources_loaded_")
+        ]
         for k in keys_to_remove:
             del st.session_state[k]
         st.rerun()
@@ -357,14 +448,13 @@ def render_sidebar():
 
 
 # =========================================================
-# DATA PIPELINE (Hibrit Mod + Progress)
+# DATA PIPELINE
 # =========================================================
 def load_pipeline(mode, rows_per_query, max_resources):
-    """Veri yükleme: Demo CSV her zaman temel, CKAN üstüne ekleniyor."""
+    """Demo CSV her zaman temel; CKAN modunda üstüne ekleniyor."""
     candidate_df = pd.DataFrame()
     loaded_info = []
 
-    # Demo CSV her zaman temel
     demo_raw = cached_load_local_data(LOCAL_FILE).copy()
     demo_df = normalize_columns(demo_raw)
     demo_df = ensure_app_columns(demo_df)
@@ -373,7 +463,6 @@ def load_pipeline(mode, rows_per_query, max_resources):
     if mode == "Stabil Demo CSV":
         return demo_df, candidate_df, loaded_info, "Stabil Demo CSV", "data/kocaeli_shelters.csv"
 
-    # ---- CKAN modu: progress bar ile tarama ----
     candidate_df = search_turkiye_with_progress(rows_per_query)
 
     if candidate_df.empty:
@@ -382,39 +471,10 @@ def load_pipeline(mode, rows_per_query, max_resources):
 
     candidate_records = candidate_df.to_dict(orient="records")
 
-    st.success(f"Türkiye geneli taramada {len(candidate_df)} uygun resource adayı bulundu.")
     with st.expander("🇹🇷 Bulunan Resource Adayları", expanded=False):
         st.dataframe(candidate_df, width="stretch", height=300)
 
-    # ---- Resource yükleme: progress bar ile ----
-    st.markdown("#### 📥 Resource'lar İndiriliyor")
-    download_progress = st.progress(0.0)
-    download_status = st.empty()
-    download_status.info(f"⏳ {min(max_resources, len(candidate_records))} resource yüklenecek...")
-
-    resources_tuple = tuple(to_resource_tuple(r) for r in candidate_records)
-
-    try:
-        result = cached_load_multiple_resources(resources_tuple, max_resources)
-        if isinstance(result, tuple) and len(result) >= 2:
-            df_loaded = result[0]
-            loaded_info = result[1]
-        elif isinstance(result, pd.DataFrame):
-            df_loaded = result
-            loaded_info = []
-        else:
-            df_loaded = pd.DataFrame()
-            loaded_info = []
-    except Exception as e:
-        download_status.error(f"❌ Resource yükleme hatası: {e}")
-        df_loaded = pd.DataFrame()
-        loaded_info = []
-
-    download_progress.progress(1.0)
-    download_status.success(
-        f"✅ {len(loaded_info) if loaded_info else 0} resource başarıyla yüklendi · "
-        f"{len(df_loaded)} satır."
-    )
+    df_loaded, loaded_info, failed = load_resources_with_progress(candidate_records, max_resources)
 
     if df_loaded.empty:
         st.warning("CKAN'dan veri yüklenemedi. Demo veri kullanılıyor.")
@@ -425,13 +485,13 @@ def load_pipeline(mode, rows_per_query, max_resources):
     if "source_portal" not in df_loaded.columns or df_loaded["source_portal"].astype(str).eq("").all():
         df_loaded["source_portal"] = "CKAN"
 
-    # Hibrit mod: Demo + CKAN her zaman birleştirilir
     usable_ckan = int(df_loaded["coordinate_valid"].sum())
     has_cap_ckan = int(df_loaded["capacity_available"].sum())
+    has_name_ckan = int(df_loaded["name_available"].sum())
 
     st.info(
-        f"📊 CKAN'dan {len(df_loaded)} satır yüklendi "
-        f"({usable_ckan} koordinatlı, {has_cap_ckan} kapasite bilgili). "
+        f"📊 CKAN'dan **{len(df_loaded)}** satır yüklendi "
+        f"({usable_ckan} koordinatlı, {has_cap_ckan} kapasite, {has_name_ckan} isim). "
         f"Demo verisi ({len(demo_df)} kayıt) ile birleştiriliyor."
     )
 
@@ -443,7 +503,7 @@ def load_pipeline(mode, rows_per_query, max_resources):
         candidate_df,
         loaded_info,
         "Hibrit (Demo + CKAN)",
-        f"Demo + {len(loaded_info) if loaded_info else len(df_loaded)} CKAN resource",
+        f"Demo + {len(loaded_info)} CKAN resource",
     )
 
 
@@ -505,6 +565,30 @@ def render_map(df: pd.DataFrame):
                     st.dataframe(df[cols].head(10), width="stretch")
         return
 
+    # Performans: çok fazla nokta varsa örnekle
+    original_count = len(map_df)
+    sampled = False
+    if original_count > MAX_MAP_POINTS:
+        # Önce risk_eligible olanları al, sonra rastgele örnekle
+        priority = map_df[as_bool_series(map_df["risk_eligible"])]
+        rest = map_df[~as_bool_series(map_df["risk_eligible"])]
+        
+        if len(priority) >= MAX_MAP_POINTS:
+            map_df = priority.sample(n=MAX_MAP_POINTS, random_state=42)
+        else:
+            remaining = MAX_MAP_POINTS - len(priority)
+            map_df = pd.concat([
+                priority,
+                rest.sample(n=min(remaining, len(rest)), random_state=42)
+            ], ignore_index=True)
+        sampled = True
+
+    if sampled:
+        st.warning(
+            f"⚡ Performans için {original_count:,} kayıttan {len(map_df):,} tanesi haritada gösteriliyor "
+            f"(risk-uygun olanlar öncelikli)."
+        )
+
     try:
         shelter_map = create_shelter_map(map_df)
         st_folium(shelter_map, width=1100, height=620, returned_objects=[])
@@ -521,7 +605,17 @@ def render_record_detail(df: pd.DataFrame):
         st.warning("Filtreye uygun kayıt bulunamadı.")
         return
 
-    view = df.reset_index(drop=True).copy()
+    # Çok fazla kayıt varsa sadece risk-uygun olanları göster
+    view_source = df
+    if len(df) > 500:
+        priority = df[as_bool_series(df["risk_eligible"]) | as_bool_series(df["capacity_available"])]
+        if not priority.empty:
+            view_source = priority.head(500)
+            st.caption(f"ℹ️ {len(df):,} kayıttan ilk 500 öncelikli kayıt listeleniyor.")
+        else:
+            view_source = df.head(500)
+
+    view = view_source.reset_index(drop=True).copy()
     name_str = view["name"].fillna("Bilinmeyen").astype(str)
     city_str = view["city"].fillna("—").astype(str)
     district_str = view["district"].fillna("—").astype(str)
@@ -535,6 +629,7 @@ def render_record_detail(df: pd.DataFrame):
     st.write(f"**İl:** {row.get('city', '—')}")
     st.write(f"**İlçe:** {row.get('district', '—')}")
     st.write(f"**Veri Kapsamı:** `{row.get('data_scope', '—')}`")
+    st.write(f"**Kaynak Portal:** {row.get('source_portal', '—')}")
 
     if pd.notna(row.get("capacity")):
         st.markdown("#### Kapasite & Doluluk")
@@ -615,10 +710,8 @@ def main():
     inject_css()
     render_hero()
 
-    # Sidebar
     mode, rows_per_query, max_resources, strict_mode = render_sidebar()
 
-    # Data pipeline (progress bar dahil)
     df, candidate_df, loaded_info, source_name, resource_label = load_pipeline(
         mode, rows_per_query, max_resources
     )
@@ -634,24 +727,36 @@ def main():
 
     df = ensure_app_columns(df)
 
-    # Strict Mode filtre — gevşek versiyon
+    # ---- AKILLI STRICT MODE ----
     if strict_mode and not df.empty:
         before = len(df)
         valid_scopes = ["risk_ready", "capacity_only", "location_only"]
-        candidate = df[df["data_scope"].astype(str).isin(valid_scopes)].copy()
-        candidate = candidate[as_bool_series(candidate["name_available"])]
 
-        if not candidate.empty:
-            df = candidate
+        # Adım 1: scope filtresi
+        candidate = df[df["data_scope"].astype(str).isin(valid_scopes)].copy()
+
+        # Adım 2: name_available filtresi (çoğu artık True olmalı)
+        with_name = candidate[as_bool_series(candidate["name_available"])]
+
+        if not with_name.empty:
+            df = with_name
             removed = before - len(df)
             if removed > 0:
-                st.sidebar.success(f"🔒 Strict: {removed} kayıt çıkarıldı.")
-        else:
+                st.sidebar.success(f"🔒 Strict: {removed:,} kayıt çıkarıldı.")
+                st.sidebar.caption(
+                    f"📊 Kalan: {len(df):,} kayıt · "
+                    f"{int(as_bool_series(df['coordinate_valid']).sum()):,} koordinatlı"
+                )
+        elif not candidate.empty:
+            df = candidate
             st.sidebar.warning(
-                "⚠️ Strict Mode tüm kayıtları elerdi. İsim alanı dolu kayıtlar gösteriliyor."
+                f"⚠️ Strict: name filtresi atlandı. "
+                f"{len(df):,} scope-uygun kayıt gösteriliyor."
             )
-            relaxed = df[as_bool_series(df["name_available"])]
+        else:
+            relaxed = df[as_bool_series(df["coordinate_valid"]) | as_bool_series(df["name_available"])]
             df = relaxed if not relaxed.empty else df
+            st.sidebar.warning("⚠️ Strict Mode tüm filtreleri yedi. Gevşek mod aktif.")
 
     # ---- Sidebar filtreleri ----
     st.sidebar.markdown("---")
@@ -671,7 +776,6 @@ def main():
         st.sidebar.multiselect("İlçe seç", districts, default=districts) if use_district else districts
     )
 
-    # Akıllı default
     if risk_levels:
         default_risks = [r for r in risk_levels if r != "Veri yetersiz"]
         if not default_risks:
@@ -687,7 +791,7 @@ def main():
         st.sidebar.info("ℹ️ Risk filtresi boş — tüm seviyeler gösteriliyor.")
         selected_risks = risk_levels
 
-    # ---- Filtre uygula ----
+    # Filtre uygula
     if df.empty:
         filtered = df.copy()
     else:
@@ -697,7 +801,7 @@ def main():
             & df["risk_level"].astype(str).isin(selected_risks)
         ].copy()
 
-    # ---- Render ----
+    # Render
     render_kpis(filtered)
     st.divider()
 
@@ -719,7 +823,12 @@ def main():
     render_dashboard_tabs(filtered, district_summary, history_df)
 
     with st.expander("🧾 Ham Veri", expanded=False):
-        st.dataframe(filtered, width="stretch")
+        # 22000+ satırı tek seferde göstermek yavaşlatabilir
+        if len(filtered) > 1000:
+            st.caption(f"ℹ️ {len(filtered):,} kayıttan ilk 1000 gösteriliyor.")
+            st.dataframe(filtered.head(1000), width="stretch")
+        else:
+            st.dataframe(filtered, width="stretch")
 
 
 if __name__ == "__main__":
