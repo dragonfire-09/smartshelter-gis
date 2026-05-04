@@ -149,10 +149,7 @@ def as_bool_series(series):
 
 
 def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Eksik sütunları güvenli default'larla doldur ve flag'leri compute et.
-    
-    İsim akıllı türetme: name boşsa, diğer alanlardan otomatik üretir.
-    """
+    """Eksik sütunları güvenli default'larla doldur ve flag'leri compute et."""
     df = df.copy()
 
     string_defaults = {
@@ -183,7 +180,7 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df["lon"].isna().all() and not df["longitude"].isna().all():
         df["lon"] = df["longitude"]
 
-    # ---- 🆕 İSİM AKILLI TÜRETME ----
+    # ---- İSİM AKILLI TÜRETME (vektörize, NA-safe) ----
     name_alt_cols = [
         "adi", "adı", "ad", "tesis_adi", "tesis_adı",
         "kurum_adi", "kurum_adı", "merkez_adi", "merkez_adı",
@@ -192,54 +189,60 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
         "sokak", "cadde",
     ]
 
- def _safe_str(val):
-    if val is None:
-        return ""
-    if pd.isna(val):    
-        return ""
- 
+    def clean_str_series(s):
+        out = s.astype(str).str.strip()
+        out = out.replace({"nan": "", "None": "", "<NA>": "", "NaN": ""})
+        return out
 
-    s = str(val).strip()
-    if s.lower() in ("nan", "none", "<na>", ""):
-        return ""
-    return s
+    name_clean = clean_str_series(df["name"])
 
-existing = _safe_str(row.get("name"))
+    # Alternatif sütunlardan doldur
+    for col in name_alt_cols:
+        if col in df.columns:
+            mask = name_clean.eq("")
+            if mask.any():
+                alt = clean_str_series(df[col])
+                name_clean = name_clean.where(~mask, alt)
 
-        # 2. Alternatif sütunlardan al
-        for col in name_alt_cols:
-            val = row.get(col)
-            if val is not None:
-                val_str = str(val).strip()
-                if val_str and val_str.lower() not in ("nan", "none", "<na>", ""):
-                    return val_str
+    # Konum + portal'dan doldur
+    mask = name_clean.eq("")
+    if mask.any():
+        district_s = clean_str_series(df["district"])
+        city_s = clean_str_series(df["city"])
+        portal_s = clean_str_series(df["source_portal"])
 
-        # 3. Konum + portal
-        district = str(row.get("district", "") or "").strip()
-        city = str(row.get("city", "") or "").strip()
-        portal = str(row.get("source_portal", "") or "").strip()
+        def combine_loc(d, c, p):
+            parts = [x for x in [d, c] if x]
+            loc = " / ".join(parts)
+            if loc and p:
+                return f"{p} · {loc}"
+            if loc:
+                return loc
+            if p:
+                return f"{p} kaydı"
+            return ""
 
-        loc = " / ".join([p for p in [district, city] if p and p.lower() not in ("nan", "none", "")])
+        derived = pd.Series(
+            [combine_loc(d, c, p) for d, c, p in zip(district_s, city_s, portal_s)],
+            index=df.index,
+        )
+        name_clean = name_clean.where(~mask, derived)
 
-        if loc and portal:
-            return f"{portal} · {loc}"
-        if loc:
-            return loc
-        if portal:
-            return f"{portal} kaydı"
+    # Son çare: koordinat
+    mask = name_clean.eq("")
+    if mask.any():
+        lat_s = pd.to_numeric(df["lat"], errors="coerce")
+        lon_s = pd.to_numeric(df["lon"], errors="coerce")
+        coord_label = pd.Series(
+            [
+                f"Kayıt @ {la:.3f}, {lo:.3f}" if pd.notna(la) and pd.notna(lo) else ""
+                for la, lo in zip(lat_s, lon_s)
+            ],
+            index=df.index,
+        )
+        name_clean = name_clean.where(~mask, coord_label)
 
-        # 4. Son çare: koordinat
-        lat = row.get("lat")
-        lon = row.get("lon")
-        try:
-            if pd.notna(lat) and pd.notna(lon):
-                return f"Kayıt @ {float(lat):.3f}, {float(lon):.3f}"
-        except Exception:
-            pass
-
-        return ""
-
-    df["name"] = df.apply(derive_name, axis=1)
+    df["name"] = name_clean
 
     # Bool flag default'ları
     bool_flags = [
@@ -253,12 +256,8 @@ existing = _safe_str(row.get("name"))
         else:
             df[flag] = as_bool_series(df[flag])
 
-    # Otomatik flag'leri compute et
-    df["name_available"] = (
-        df["name"].astype(str).str.strip()
-        .replace({"nan": "", "None": "", "<NA>": ""})
-        .ne("")
-    )
+    # Otomatik flag'ler
+    df["name_available"] = df["name"].astype(str).str.strip().ne("")
     df["coordinate_valid"] = (
         df["lat"].between(-90, 90, inclusive="both")
         & df["lon"].between(-180, 180, inclusive="both")
@@ -267,16 +266,11 @@ existing = _safe_str(row.get("name"))
     df["occupancy_available"] = df["occupancy"].notna()
     df["risk_eligible"] = df["capacity_available"] & df["occupancy_available"]
 
-    # data_scope sınıflandır
-    def classify_scope(row):
-        if row["risk_eligible"] and row["coordinate_valid"]:
-            return "risk_ready"
-        if row["risk_eligible"]:
-            return "capacity_only"
-        if row["coordinate_valid"]:
-            return "location_only"
-        return "metadata_only"
-    df["data_scope"] = df.apply(classify_scope, axis=1)
+    # data_scope sınıflandır (vektörize)
+    df["data_scope"] = "metadata_only"
+    df.loc[df["coordinate_valid"], "data_scope"] = "location_only"
+    df.loc[df["risk_eligible"], "data_scope"] = "capacity_only"
+    df.loc[df["risk_eligible"] & df["coordinate_valid"], "data_scope"] = "risk_ready"
 
     return df
 
