@@ -1,14 +1,7 @@
 import pandas as pd
 
 
-# ---------------------------------------------------------
-# Risk Calculation
-# ---------------------------------------------------------
 def calculate_risk(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Risk skoru hesaplar. Yalnızca risk_eligible kayıtlar için.
-    Eksik veriye dayanarak fabrikasyon yapmaz.
-    """
     df = df.copy()
 
     df["risk_score"] = pd.NA
@@ -27,19 +20,13 @@ def calculate_risk(df: pd.DataFrame) -> pd.DataFrame:
 
     occ_rate = pd.to_numeric(sub.get("occupancy_rate"), errors="coerce").fillna(0)
     animals_per_vet = pd.to_numeric(sub.get("animals_per_vet"), errors="coerce").fillna(0)
-    capacity = pd.to_numeric(sub.get("capacity"), errors="coerce").fillna(0)
     occupancy = pd.to_numeric(sub.get("occupancy"), errors="coerce").fillna(0)
     sterilization = pd.to_numeric(sub.get("sterilization_count"), errors="coerce").fillna(0)
     adoption = pd.to_numeric(sub.get("adoption_count"), errors="coerce").fillna(0)
 
-    # Doluluk baskısı: 0-100 doluluk %.
     occupancy_pressure = occ_rate.clip(0, 150)
-
-    # Veteriner baskısı: 0-200 hayvan/veteriner -> 0-100 puan.
     vet_pressure = (animals_per_vet.clip(0, 200) / 200) * 100
 
-    # Sahiplendirme/Kısırlaştırma performansı
-    # Yüksek mevcut hayvana karşı düşük sahiplendirme + kısırlaştırma => risk artar.
     operational_baseline = (sterilization + adoption).clip(lower=0)
 
     operational_ratio = pd.Series(0.0, index=sub.index)
@@ -48,10 +35,8 @@ def calculate_risk(df: pd.DataFrame) -> pd.DataFrame:
         operational_baseline.loc[safe_occ_mask] / occupancy.loc[safe_occ_mask]
     ).clip(0, 1)
 
-    # 1.0 ratio => 0 risk katkısı, 0.0 ratio => 100 risk katkısı
     operational_pressure = (1 - operational_ratio) * 100
 
-    # Ağırlıklı toplam
     score = (
         occupancy_pressure * 0.45
         + vet_pressure * 0.30
@@ -72,9 +57,6 @@ def calculate_risk(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------
-# Action Recommendations
-# ---------------------------------------------------------
 def create_action_recommendations(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
