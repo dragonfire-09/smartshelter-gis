@@ -1114,7 +1114,7 @@ elif mode == "Canlı CKAN API Dene":
     rows = 100 if deep_scan else 20
     deep_queries_tuple = tuple(source.get("deep_queries", [])) if deep_scan else tuple()
 
-    try:
+try:
     portal_count = len(TURKIYE_CKAN_SOURCES)
 
     scan_status = st.empty()
