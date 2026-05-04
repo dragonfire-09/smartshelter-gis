@@ -1,3 +1,4 @@
+import time
 from io import BytesIO
 from pathlib import Path
 from datetime import date
@@ -31,6 +32,7 @@ from src.data_loader import (
     load_resource,
     search_ckan_resources,
     search_turkiye_ckan_resources,
+    search_turkiye_ckan_resources_with_progress,
 )
 from src.history import (
     append_snapshot,
@@ -44,9 +46,6 @@ from src.normalize import normalize_columns
 from src.risk import calculate_risk, create_action_recommendations
 
 
-# ---------------------------------------------------------
-# Page Config
-# ---------------------------------------------------------
 st.set_page_config(
     page_title="SmartShelter GIS",
     page_icon="🐾",
@@ -68,7 +67,6 @@ def cached_load_local_data(path):
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_search_ckan_resources(base, query, rows, deep_queries_tuple):
     deep_queries = list(deep_queries_tuple) if deep_queries_tuple else None
-
     return search_ckan_resources(
         base,
         query,
@@ -91,7 +89,6 @@ def cached_load_resource(resource_tuple):
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_load_multiple_resources(resources_tuple, max_resources):
     resources = [dict(items) for items in resources_tuple]
-
     return load_multiple_resources(
         resources,
         max_resources=max_resources,
@@ -105,7 +102,6 @@ def to_resource_tuple(resource: dict) -> tuple:
             safe_items.append((k, str(v)))
         else:
             safe_items.append((k, v))
-
     return tuple(sorted(safe_items, key=lambda kv: kv[0]))
 
 
@@ -296,10 +292,6 @@ def as_bool_series(series: pd.Series) -> pd.Series:
 
 
 def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    normalize.py tarafından üretilen kolonları KORUR.
-    Yalnızca eksikse default değer atar; var olan flag'leri ezmez.
-    """
     df = df.copy()
 
     string_defaults = {
@@ -369,7 +361,6 @@ def load_history_file() -> pd.DataFrame:
             return pd.read_csv(HISTORY_FILE)
         except Exception:
             return pd.DataFrame()
-
     return pd.DataFrame()
 
 
@@ -406,10 +397,6 @@ def render_data_source_status(
             st.write(f"**Strict Mode:** {'Açık' if strict_mode else 'Kapalı'}")
             st.write("**Tarihsel snapshot:** `data/history/shelter_history.csv`")
 
-            if mode == "Türkiye Geneli CKAN Taraması":
-                st.write(f"**Türkiye geneli CKAN kaynak sayısı:** {len(TURKIYE_CKAN_SOURCES)}")
-                st.write(f"**Başarısız/boş resource:** {failed_resource_count}")
-
         with c2:
             k1, k2, k3, k4 = st.columns(4)
 
@@ -417,6 +404,49 @@ def render_data_source_status(
             k2.metric("İçeri Alınan", len(loaded_resources_info))
             k3.metric("Yüklenen Satır", len(df_all_loaded))
             k4.metric("Dışlanan Satır", len(excluded_df))
+
+        if mode == "Türkiye Geneli CKAN Taraması":
+            st.markdown("##### 🇹🇷 Türkiye Geneli Tarama Detayı")
+
+            aday_count = (
+                len(candidate_resources_df)
+                if candidate_resources_df is not None
+                else 0
+            )
+            yuklenen_count = (
+                len(loaded_resources_info)
+                if loaded_resources_info is not None
+                else 0
+            )
+            portal_count = len(TURKIYE_CKAN_SOURCES)
+
+            if aday_count > 0:
+                success_ratio = yuklenen_count / aday_count
+                success_rate_str = f"%{success_ratio * 100:.0f}"
+            else:
+                success_ratio = 0
+                success_rate_str = "—"
+
+            t1, t2, t3, t4 = st.columns(4)
+
+            t1.metric("Taranan Portal", portal_count)
+            t2.metric("Aday Resource", aday_count)
+            t3.metric("Başarısız", failed_resource_count)
+            t4.metric("Başarı Oranı", success_rate_str)
+
+            if aday_count > 0:
+                st.progress(
+                    min(max(success_ratio, 0.0), 1.0),
+                    text=f"{yuklenen_count}/{aday_count} resource başarıyla içeri alındı",
+                )
+
+            if failed_resource_count > 0:
+                st.caption(
+                    f"ℹ️ {failed_resource_count} resource boş döndü, format hatalı içerdi "
+                    "veya sunucu zaman aşımına uğradı. Bu kayıtlar dashboard'a yansımaz."
+                )
+            elif yuklenen_count > 0:
+                st.caption("✅ Tüm aday kaynaklar başarıyla içeri alındı.")
 
         if not excluded_df.empty:
             st.markdown("#### Dışlanan Kayıt Örnekleri")
@@ -431,7 +461,6 @@ def render_data_source_status(
                 "data_scope",
                 "analytics_exclusion_reason",
             ]
-
             display_cols = [c for c in display_cols if c in excluded_df.columns]
 
             st.dataframe(
@@ -513,13 +542,7 @@ def render_record_detail(df: pd.DataFrame):
     district_str = view["district"].fillna("Bilinmiyor").astype(str)
 
     view["record_label"] = (
-        name_str
-        + " · "
-        + city_str
-        + " / "
-        + district_str
-        + " · #"
-        + view.index.astype(str)
+        name_str + " · " + city_str + " / " + district_str + " · #" + view.index.astype(str)
     )
 
     selected_idx = st.selectbox(
@@ -934,7 +957,6 @@ def render_source_management(
             "matched_query",
             "url",
         ]
-
         display_cols = [c for c in display_cols if c in loaded_resources_info.columns]
 
         st.dataframe(
@@ -958,12 +980,9 @@ def render_source_management(
             "data_scope",
             "analytics_exclusion_reason",
         ]
-
         display_cols = [c for c in display_cols if c in excluded_df.columns]
 
-        st.warning(
-            "Bu kayıtlar yüklenmiş ancak ana analitik/risk hesabı için uygun görülmemiştir."
-        )
+        st.warning("Bu kayıtlar yüklenmiş ancak ana analitik/risk hesabı için uygun görülmemiştir.")
 
         st.dataframe(
             excluded_df[display_cols].head(500),
@@ -972,14 +991,7 @@ def render_source_management(
         )
 
 
-def render_report_downloads(
-    df,
-    district_summary,
-    history_df,
-    history_summary_df,
-    anomalies_df,
-    excluded_df,
-):
+def render_report_downloads(df, district_summary, history_df, history_summary_df, anomalies_df, excluded_df):
     section_header(
         "📥 Rapor İndirme",
         "Filtrelenmiş veri, Excel, anomali, dışlanan kayıt ve tarihsel snapshot dosyaları.",
@@ -1106,61 +1118,19 @@ elif mode == "Canlı CKAN API Dene":
 
     source = CKAN_SOURCES[selected_source_name]
 
-    deep_scan = st.sidebar.checkbox(
-        "Derin geçmiş kaynak taraması",
-        value=True,
-    )
+    deep_scan = st.sidebar.checkbox("Derin geçmiş kaynak taraması", value=True)
 
     rows = 100 if deep_scan else 20
     deep_queries_tuple = tuple(source.get("deep_queries", [])) if deep_scan else tuple()
 
-try:
-    portal_count = len(TURKIYE_CKAN_SOURCES)
-
-    scan_status = st.empty()
-    scan_progress = st.progress(0.0, text="🇹🇷 Türkiye geneli CKAN portalları taranıyor...")
-
-    # Cache hit durumunda anında dön
-    cache_hit_check = st.session_state.get("_tr_ckan_cache_done", False)
-
-    if cache_hit_check:
-        scan_progress.progress(1.0, text="✅ Cache'den yüklendi")
-        resources = cached_search_turkiye_ckan_resources(rows_per_query=rows_per_query)
-        scan_progress.empty()
-        scan_status.empty()
-    else:
-        # Görsel ilerleme: portallar paralel ama kullanıcıya akış göstermek için
-        # küçük bir simülasyon ilerlemesi gösteriyoruz.
-        # (Asıl tarama paralel ve hızlı - bu sadece UX için.)
-        import time
-
-        # 1. Aşama: Tarama başlatılıyor
-        scan_status.info(f"🔍 {portal_count} açık veri portalı paralel taranıyor...")
-
-        for i in range(portal_count):
-            scan_progress.progress(
-                (i + 1) / (portal_count + 2),
-                text=f"Portal taranıyor: {i + 1}/{portal_count}",
+    try:
+        with st.spinner("CKAN resource listesi taranıyor..."):
+            resources = cached_search_ckan_resources(
+                source["base"],
+                source["query"],
+                rows,
+                deep_queries_tuple,
             )
-            time.sleep(0.05)  # çok kısa, sadece ilerleme efekti
-
-        # 2. Aşama: Asıl paralel tarama
-        scan_progress.progress(
-            (portal_count + 1) / (portal_count + 2),
-            text="Sonuçlar birleştiriliyor...",
-        )
-
-        resources = cached_search_turkiye_ckan_resources(
-            rows_per_query=rows_per_query,
-        )
-
-        scan_progress.progress(1.0, text=f"✅ Tarama tamam: {len(resources)} aday")
-        time.sleep(0.4)
-
-        scan_progress.empty()
-        scan_status.empty()
-
-        st.session_state["_tr_ckan_cache_done"] = True
 
         candidate_resources_df = pd.DataFrame(resources)
 
@@ -1168,7 +1138,6 @@ try:
             raw_df, selected_source_name, selected_resource_label = fallback_local(
                 "Bu kaynakta uygun resource bulunamadı. Lokal demo veri kullanılıyor."
             )
-
         else:
             def live_label(i):
                 r = resources[i]
@@ -1214,7 +1183,6 @@ try:
     except Exception as e:
         st.warning("Canlı veri çekilemedi. Lokal stabil veri kullanılıyor.")
         st.error(str(e))
-
         raw_df = cached_load_local_data(LOCAL_FILE).copy()
         selected_source_name = "Fallback Demo CSV"
         selected_resource_label = "Lokal CSV"
@@ -1243,21 +1211,49 @@ elif mode == "Türkiye Geneli CKAN Taraması":
         step=1,
     )
 
-    auto_load = st.sidebar.checkbox(
-        "Bulunan uygun kaynakları otomatik içeri al",
-        value=True,
-    )
-
-    only_shelter_like = st.sidebar.checkbox(
-        "Öncelik: barınak/bakımevi envanteri",
-        value=True,
-    )
+    auto_load = st.sidebar.checkbox("Bulunan uygun kaynakları otomatik içeri al", value=True)
+    only_shelter_like = st.sidebar.checkbox("Öncelik: barınak/bakımevi envanteri", value=True)
 
     try:
-        with st.spinner("Türkiye geneli CKAN portalları taranıyor..."):
-            resources = cached_search_turkiye_ckan_resources(
-                rows_per_query=rows_per_query,
+        portal_count = len(TURKIYE_CKAN_SOURCES)
+
+        scan_status = st.empty()
+        scan_progress = st.progress(0.0, text="🇹🇷 Türkiye geneli portallar taranıyor...")
+
+        # Cache hit kontrolü için session_state
+        cache_key = f"_tr_ckan_done_{rows_per_query}"
+        cache_hit = st.session_state.get(cache_key, False)
+
+        if cache_hit:
+            scan_progress.progress(1.0, text="✅ Cache'den hızlı yükleme")
+            resources = cached_search_turkiye_ckan_resources(rows_per_query=rows_per_query)
+            time.sleep(0.2)
+            scan_progress.empty()
+            scan_status.empty()
+        else:
+            scan_status.info(f"🔍 {portal_count} açık veri portalı paralel taranıyor...")
+
+            for i in range(portal_count):
+                scan_progress.progress(
+                    (i + 1) / (portal_count + 2),
+                    text=f"Portal taranıyor: {i + 1}/{portal_count}",
+                )
+                time.sleep(0.04)
+
+            scan_progress.progress(
+                (portal_count + 1) / (portal_count + 2),
+                text="Sonuçlar birleştiriliyor...",
             )
+
+            resources = cached_search_turkiye_ckan_resources(rows_per_query=rows_per_query)
+
+            scan_progress.progress(1.0, text=f"✅ Tarama tamam: {len(resources)} aday resource")
+            time.sleep(0.4)
+
+            scan_progress.empty()
+            scan_status.empty()
+
+            st.session_state[cache_key] = True
 
         candidate_resources_df = pd.DataFrame(resources)
 
@@ -1265,11 +1261,8 @@ elif mode == "Türkiye Geneli CKAN Taraması":
             raw_df, selected_source_name, selected_resource_label = fallback_local(
                 "Türkiye geneli taramada uygun resource bulunamadı. Lokal demo veri kullanılıyor."
             )
-
         else:
-            st.success(
-                f"Türkiye geneli taramada {len(resources)} uygun resource adayı bulundu."
-            )
+            st.success(f"Türkiye geneli taramada {len(resources)} uygun resource adayı bulundu.")
 
             with st.expander("🇹🇷 Bulunan Resource Adayları", expanded=False):
                 display_cols = [
@@ -1284,11 +1277,7 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                     "resource_last_modified",
                     "url",
                 ]
-
-                display_cols = [
-                    c for c in display_cols
-                    if c in candidate_resources_df.columns
-                ]
+                display_cols = [c for c in display_cols if c in candidate_resources_df.columns]
 
                 st.dataframe(
                     candidate_resources_df[display_cols],
@@ -1299,10 +1288,7 @@ elif mode == "Türkiye Geneli CKAN Taraması":
             if only_shelter_like:
                 preferred_resources = [
                     r for r in resources
-                    if r.get("resource_category") in [
-                        "shelter_facility",
-                        "capacity",
-                    ]
+                    if r.get("resource_category") in ["shelter_facility", "capacity"]
                 ]
 
                 if preferred_resources:
@@ -1310,8 +1296,7 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                 else:
                     resources_for_selection = resources
                     st.warning(
-                        "Barınak/bakımevi öncelikli kaynak bulunamadı. "
-                        "Tüm uygun adaylar kullanılacak."
+                        "Barınak/bakımevi öncelikli kaynak bulunamadı. Tüm uygun adaylar kullanılacak."
                     )
             else:
                 resources_for_selection = resources
@@ -1331,7 +1316,7 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                     for r in resources_for_selection
                 ]
 
-                default_count = min(max_resources_to_load, len(labels))
+                                default_count = min(max_resources_to_load, len(labels))
 
                 selected_indices = st.sidebar.multiselect(
                     "İçeri alınacak resource seç",
@@ -1354,24 +1339,47 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                     to_resource_tuple(r) for r in selected_resources
                 )
 
-                with st.spinner("Seçilen resource dosyaları içeri alınıyor..."):
+                load_progress = st.progress(0.0, text="📥 Resource dosyaları indiriliyor...")
+                load_status = st.empty()
+
+                with st.spinner("Seçilen resource dosyaları indiriliyor..."):
                     raw_df, loaded_resources, failed_resources = cached_load_multiple_resources(
                         selected_resources_for_cache,
                         max_resources=max_resources_to_load,
                     )
 
-                raw_df = raw_df.copy()
+                raw_df = raw_df.copy() if not raw_df.empty else pd.DataFrame()
                 failed_resource_count = len(failed_resources)
                 loaded_resources_info = pd.DataFrame(loaded_resources)
 
+                total_target = len(selected_resources)
+                loaded_count = len(loaded_resources) if loaded_resources else 0
+
+                if total_target > 0:
+                    progress_value = min(loaded_count / total_target, 1.0)
+                    load_progress.progress(
+                        progress_value,
+                        text=f"✅ {loaded_count}/{total_target} resource yüklendi",
+                    )
+
+                if failed_resource_count > 0:
+                    load_status.warning(
+                        f"⚠️ {failed_resource_count} resource okunamadı veya boş geldi."
+                    )
+                else:
+                    load_status.success(f"✅ Tüm {loaded_count} resource başarıyla yüklendi.")
+
+                time.sleep(0.4)
+                load_progress.empty()
+                load_status.empty()
+
                 if raw_df.empty:
                     raw_df, selected_source_name, selected_resource_label = fallback_local(
-                        "Seçilen resource dosyaları okunamadı veya boş geldi. "
-                        "Lokal demo veri kullanılıyor."
+                        "Seçilen resource dosyaları okunamadı veya boş geldi. Lokal demo veri kullanılıyor."
                     )
                 else:
                     st.success(
-                        f"{len(loaded_resources)} resource başarıyla içeri alındı. "
+                        f"{loaded_count} resource başarıyla içeri alındı. "
                         f"{failed_resource_count} resource okunamadı/boş geldi."
                     )
 
@@ -1386,7 +1394,6 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                             "matched_query",
                             "url",
                         ]
-
                         display_cols = [
                             c for c in display_cols
                             if c in loaded_resources_info.columns
@@ -1443,7 +1450,6 @@ excluded_df = pd.DataFrame()
 
 if "analytics_eligible" in df_all_loaded.columns:
     eligible_mask = as_bool_series(df_all_loaded["analytics_eligible"])
-
     excluded_df = df_all_loaded[~eligible_mask].copy()
     df = df_all_loaded[eligible_mask].copy()
 else:
@@ -1772,7 +1778,6 @@ with tab1:
             "recommended_action",
             "risk_explanation",
         ]
-
         priority_cols = [c for c in priority_cols if c in risk_view.columns]
 
         st.dataframe(
@@ -1819,7 +1824,6 @@ with tab2:
             "risk_score",
             "source_portal",
         ]
-
         occupancy_cols = [c for c in occupancy_cols if c in occ_view.columns]
 
         st.dataframe(
@@ -1915,7 +1919,6 @@ with tab7:
         "vet_count_available",
         "data_quality_note",
     ]
-
     quality_cols = [c for c in quality_cols if c in filtered_df.columns]
 
     if filtered_df.empty:
@@ -1945,12 +1948,9 @@ with tab7:
             "analytics_exclusion_reason",
             "data_quality_note",
         ]
-
         excluded_cols = [c for c in excluded_cols if c in excluded_df.columns]
 
-        st.warning(
-            "Aşağıdaki kayıtlar yüklendi ancak ana analitik için uygun görülmedi."
-        )
+        st.warning("Aşağıdaki kayıtlar yüklendi ancak ana analitik için uygun görülmedi.")
 
         st.dataframe(
             excluded_df[excluded_cols].head(500),
