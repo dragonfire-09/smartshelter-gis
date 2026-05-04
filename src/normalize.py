@@ -3,6 +3,41 @@ import pandas as pd
 
 
 # ---------------------------------------------------------
+# Slug / Canonical Key
+# ---------------------------------------------------------
+def slugify_column(col: str) -> str:
+    """
+    Bir kolon adını normalize edilmiş slug formatına dönüştürür.
+    Diğer modüller (history.py vb.) bu fonksiyonu import edebilir.
+    """
+    if not isinstance(col, str):
+        return ""
+
+    s = col.strip().lower()
+    s = (
+        s.replace("ı", "i")
+        .replace("İ", "i")
+        .replace("ş", "s")
+        .replace("Ş", "s")
+        .replace("ğ", "g")
+        .replace("Ğ", "g")
+        .replace("ü", "u")
+        .replace("Ü", "u")
+        .replace("ö", "o")
+        .replace("Ö", "o")
+        .replace("ç", "c")
+        .replace("Ç", "c")
+    )
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
+def _canonical_key(col: str) -> str:
+    return slugify_column(col)
+
+
+# ---------------------------------------------------------
 # Column synonyms
 # ---------------------------------------------------------
 COLUMN_ALIASES = {
@@ -38,30 +73,6 @@ COLUMN_ALIASES = {
     "latitude": ["latitude", "lat", "enlem", "y"],
     "longitude": ["longitude", "lon", "lng", "boylam", "x"],
 }
-
-
-def _canonical_key(col: str) -> str:
-    if not isinstance(col, str):
-        return ""
-
-    s = col.strip().lower()
-    s = (
-        s.replace("ı", "i")
-        .replace("İ", "i")
-        .replace("ş", "s")
-        .replace("Ş", "s")
-        .replace("ğ", "g")
-        .replace("Ğ", "g")
-        .replace("ü", "u")
-        .replace("Ü", "u")
-        .replace("ö", "o")
-        .replace("Ö", "o")
-        .replace("ç", "c")
-        .replace("Ç", "c")
-    )
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s
 
 
 def _detect_columns(df: pd.DataFrame) -> dict:
@@ -136,14 +147,12 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame(index=df.index)
 
-    # Kolonları taşı (yoksa NaN bırak)
     for target in target_columns:
         if target in mapping:
             out[target] = df[mapping[target]]
         else:
             out[target] = pd.NA
 
-    # Kaynak meta alanlarını koru
     for meta in [
         "source_portal",
         "source_resource",
@@ -156,7 +165,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         if meta in df.columns:
             out[meta] = df[meta]
 
-    # Sayısal cast
     numeric_cols = [
         "capacity",
         "occupancy",
@@ -169,30 +177,25 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in numeric_cols:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    # Available flag'ler — yalnızca gerçek değer varsa True
     out["name_available"] = out["name"].notna() & out["name"].astype(str).str.strip().ne("")
     out["city_available"] = out["city"].notna() & out["city"].astype(str).str.strip().ne("")
     out["capacity_available"] = out["capacity"].notna() & (out["capacity"] > 0)
     out["occupancy_available"] = out["occupancy"].notna() & (out["occupancy"] >= 0)
     out["vet_count_available"] = out["vet_count"].notna() & (out["vet_count"] >= 0)
 
-    # Koordinat doğrulama
     lat_ok = out["latitude"].between(-90, 90)
     lon_ok = out["longitude"].between(-180, 180)
     out["coordinate_valid"] = lat_ok & lon_ok
 
-    # Resource kategori (kaynak verisinden geliyorsa onu kullan, yoksa türet)
     if "resource_category" not in out.columns or out["resource_category"].isna().all():
         out["resource_category"] = out.apply(_classify_resource_category, axis=1)
     else:
-        # Boş satırlar için türet
         empty_mask = out["resource_category"].isna() | out["resource_category"].astype(str).str.strip().eq("")
         if empty_mask.any():
             out.loc[empty_mask, "resource_category"] = out.loc[empty_mask].apply(
                 _classify_resource_category, axis=1
             )
 
-    # Data scope
     def _scope(row):
         cat = str(row.get("resource_category", "")).lower()
         if cat in ["irrelevant", "operation_stats", "general_health"]:
@@ -211,14 +214,12 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     out["data_scope"] = out.apply(_scope, axis=1)
 
-    # Eligibility — KATI
     out["risk_eligible"] = out["data_scope"].eq("risk_ready")
 
     out["analytics_eligible"] = out["data_scope"].isin(
         ["risk_ready", "capacity_only", "location_only"]
     ) & out["name_available"]
 
-    # Exclusion reason
     def _exclusion_reason(row):
         reasons = []
 
@@ -243,7 +244,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
 
-    # Türetilmiş alanlar (yalnızca gerçek veri varsa)
     out["occupancy_rate"] = pd.NA
     valid_op = out["capacity_available"] & out["occupancy_available"]
     out.loc[valid_op, "occupancy_rate"] = (
@@ -256,7 +256,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         out.loc[valid_vet, "occupancy"] / out.loc[valid_vet, "vet_count"]
     ).round(1)
 
-    # Kalite notu — uydurma yok, sadece gerçek eksiklikler
     def _quality_note(row):
         notes = []
         for col_label, col_flag in [
