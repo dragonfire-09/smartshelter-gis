@@ -270,6 +270,16 @@ def load_pipeline(mode, rows_per_query, max_resources):
     source_name = "Stabil Demo CSV"
     resource_label = "data/kocaeli_shelters.csv"
 
+    # Demo CSV her zaman temel olarak yüklenir
+    demo_raw = cached_load_local_data(LOCAL_FILE).copy()
+    demo_df = normalize_columns(demo_raw)
+    demo_df = ensure_app_columns(demo_df)
+    demo_df["source_portal"] = "Demo CSV"
+
+    if mode == "Stabil Demo CSV":
+        return demo_df, candidate_df, loaded_info, source_name, resource_label
+
+    # CKAN modu
     if mode == "Türkiye Geneli CKAN Taraması":
         with st.spinner("🇹🇷 Türkiye geneli CKAN taranıyor..."):
             try:
@@ -278,7 +288,6 @@ def load_pipeline(mode, rows_per_query, max_resources):
                 st.error(f"CKAN tarama hatası: {e}")
                 raw_candidates = []
 
-        # 🔧 List / DataFrame / None — hepsini destekle
         if isinstance(raw_candidates, pd.DataFrame):
             candidate_df = raw_candidates.copy()
             candidate_records = candidate_df.to_dict(orient="records")
@@ -292,23 +301,16 @@ def load_pipeline(mode, rows_per_query, max_resources):
         if len(candidate_df) > 0:
             st.success(f"Türkiye geneli taramada {len(candidate_df)} uygun resource adayı bulundu.")
             with st.expander("🇹🇷 Bulunan Resource Adayları", expanded=False):
-                st.dataframe(candidate_df, use_container_width=True, height=300)
+                st.dataframe(candidate_df, width="stretch", height=300)
 
             resources_tuple = tuple(to_resource_tuple(r) for r in candidate_records)
 
             with st.spinner(f"Resource'lar yükleniyor (maks {max_resources})..."):
                 try:
                     result = cached_load_multiple_resources(resources_tuple, max_resources)
-
-                    # 🔧 Esnek unpack — fonksiyon farklı sayıda değer dönebilir
-                    if isinstance(result, tuple):
-                        if len(result) == 3:
-                            df_loaded, loaded_info, _failed = result
-                        elif len(result) == 2:
-                            df_loaded, loaded_info = result
-                        else:
-                            df_loaded = result[0] if result else pd.DataFrame()
-                            loaded_info = []
+                    if isinstance(result, tuple) and len(result) >= 2:
+                        df_loaded = result[0]
+                        loaded_info = result[1]
                     elif isinstance(result, pd.DataFrame):
                         df_loaded = result
                         loaded_info = []
@@ -321,30 +323,31 @@ def load_pipeline(mode, rows_per_query, max_resources):
                     loaded_info = []
 
             if not df_loaded.empty:
-                source_name = "Türkiye Geneli CKAN"
-                resource_label = f"{len(loaded_info) if loaded_info else len(df_loaded)} resource"
                 df_loaded = normalize_columns(df_loaded)
                 df_loaded = ensure_app_columns(df_loaded)
 
-                # Gerçek envanter analizine uygun mu kontrol et
-                has_capacity = int(df_loaded["capacity_available"].sum())
-                has_coords = int(df_loaded["coordinate_valid"].sum())
+                usable = int(df_loaded["coordinate_valid"].sum())
+                has_cap = int(df_loaded["capacity_available"].sum())
 
-                if has_capacity == 0 and has_coords == 0:
-                    st.warning(
-                        "⚠️ Yüklenen kaynaklar gerçek envanter analitiği için uygun görünmüyor "
-                        "(yıllık agrege istatistikler). Lokal demo veriye dönülüyor."
-                    )
+                if usable >= 3 or has_cap >= 3:
+                    # CKAN verisi yeterli — sadece onu kullan
+                    return df_loaded, candidate_df, loaded_info, "Türkiye Geneli CKAN", f"{len(loaded_info) if loaded_info else len(df_loaded)} resource"
                 else:
-                    return df_loaded, candidate_df, loaded_info, source_name, resource_label
+                    # CKAN verisi yetersiz — demo + CKAN birleştir
+                    st.info(
+                        f"ℹ️ CKAN'dan {len(df_loaded)} satır geldi ama operasyonel veri zayıf "
+                        f"(sadece {usable} koordinat, {has_cap} kapasite). "
+                        f"Demo veri ile birleştirildi."
+                    )
+                    df_loaded["source_portal"] = df_loaded.get("source_portal", "CKAN")
+                    combined = pd.concat([demo_df, df_loaded], ignore_index=True)
+                    combined = ensure_app_columns(combined)
+                    return combined, candidate_df, loaded_info, "Hibrit (Demo + CKAN)", f"Demo + {len(loaded_info) if loaded_info else len(df_loaded)} CKAN resource"
         else:
-            st.warning("CKAN taramasında uygun resource bulunamadı. Demo veriye dönülüyor.")
+            st.warning("CKAN taramasında uygun resource bulunamadı.")
 
-    # Fallback: Demo CSV
-    raw = cached_load_local_data(LOCAL_FILE).copy()
-    df = normalize_columns(raw)
-    df = ensure_app_columns(df)
-    return df, candidate_df, loaded_info, source_name, resource_label
+    # Final fallback
+    return demo_df, candidate_df, loaded_info, source_name, resource_label
 
 # =========================================================
 # RENDER BLOCKS
