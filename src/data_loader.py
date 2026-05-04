@@ -1,610 +1,631 @@
-import io
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from io import BytesIO, StringIO
+from typing import Any
+from urllib.parse import urljoin
 
 import pandas as pd
 import requests
-import streamlit as st
 
 
-LOCAL_FILE = "data/kocaeli_shelters.csv"
+DEMO_CSV_PATH = "data/kocaeli_shelters.csv"
 
-HTTP_TIMEOUT = 8
-CKAN_SEARCH_WORKERS = 12
-RESOURCE_LOAD_WORKERS = 6
-
-
-COMMON_DEEP_QUERIES = [
-    "hayvan",
-    "barınak",
-    "barinak",
-    "bakımevi",
-    "bakimevi",
-    "hayvan bakımevi",
-    "hayvan bakimevi",
-    "geçici hayvan bakımevi",
-    "gecici hayvan bakimevi",
-    "geçici hayvan bakım merkezi",
-    "gecici hayvan bakim merkezi",
-    "toplama merkezi",
-    "hayvan toplama merkezi",
-    "sokak hayvan",
-    "sokak hayvanları",
-    "sahipsiz hayvan",
-    "veteriner",
-    "kısırlaştırma",
-    "kisirlastirma",
-    "rehabilitasyon",
+DEFAULT_CKAN_PORTALS = [
+    # İstersen Streamlit Secrets içinden CKAN_PORTALS ile override et.
+    # Örnek secrets:
+    # CKAN_PORTALS = "https://data.ibb.gov.tr,https://acikveri.kocaeli.bel.tr"
+    "https://data.ibb.gov.tr",
+    "https://acikveri.kocaeli.bel.tr",
 ]
 
+CKAN_KEYWORDS = [
+    "hayvan barınağı",
+    "hayvan barinagi",
+    "barınak",
+    "barinak",
+    "sokak hayvanları",
+    "sokak hayvanlari",
+    "veteriner",
+    "geçici bakımevi",
+    "gecici bakimevi",
+]
 
-CKAN_SOURCES = {
-    "Kocaeli Açık Veri": {
-        "base": "https://veri.kocaeli.bel.tr",
-        "query": "hayvan toplama merkezi",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "Ordu Açık Veri": {
-        "base": "https://acikveri.ordu.bel.tr",
-        "query": "hayvan bakımevi",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "B40 İstanbul": {
-        "base": "https://opendata.b40cities.org",
-        "query": "hayvan bakımevi",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-}
+SUPPORTED_FORMATS = {"csv", "xlsx", "xls", "json", "geojson"}
 
 
-TURKIYE_CKAN_SOURCES = {
-    "İBB Açık Veri": {
-        "base": "https://data.ibb.gov.tr",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "İzmir Açık Veri": {
-        "base": "https://acikveri.bizizmir.com",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "Konya Açık Veri": {
-        "base": "https://acikveri.konya.bel.tr",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "Kocaeli Açık Veri": {
-        "base": "https://veri.kocaeli.bel.tr",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "Ordu Açık Veri": {
-        "base": "https://acikveri.ordu.bel.tr",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "Gaziantep Açık Veri": {
-        "base": "https://acikveri.gaziantep.bel.tr",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "Kadıköy Açık Veri": {
-        "base": "https://acikveri.kadikoy.bel.tr",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "Tuzla Açık Veri": {
-        "base": "https://veri.tuzla.bel.tr",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-    "B40 Açık Veri": {
-        "base": "https://opendata.b40cities.org",
-        "query": "hayvan",
-        "deep_queries": COMMON_DEEP_QUERIES,
-    },
-}
+@dataclass
+class DataLoadResult:
+    df: pd.DataFrame
+    source_label: str
+    mode: str
+    is_demo: bool = False
+    errors: list[str] = field(default_factory=list)
+    debug: dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------
-# HTTP Helpers
-# ---------------------------------------------------------
-def safe_get_json(url, params=None, timeout=HTTP_TIMEOUT):
-    response = requests.get(url, params=params, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
-
-
-def safe_get_bytes(url, timeout=HTTP_TIMEOUT * 2):
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    return response.content
-
-
-def infer_format(resource):
-    fmt = str(resource.get("format", "") or "").lower().strip()
-    url = str(resource.get("url", "") or "").lower()
-
-    if fmt:
-        fmt = fmt.replace(".", "").strip()
-
-    if fmt in ["csv", "xlsx", "xls", "json", "ods"]:
-        return fmt
-
-    if url.endswith(".csv"):
-        return "csv"
-    if url.endswith(".xlsx"):
-        return "xlsx"
-    if url.endswith(".xls"):
-        return "xls"
-    if url.endswith(".json") or "format=json" in url:
-        return "json"
-    if url.endswith(".ods"):
-        return "ods"
-
-    return ""
-
-
-def make_ckan_api_url(base_url):
-    base = base_url.rstrip("/")
-
-    if base.endswith("/api/3"):
-        return f"{base}/action/package_search"
-
-    if base.endswith("/api/3/action"):
-        return f"{base}/package_search"
-
-    return f"{base}/api/3/action/package_search"
-
-
-# ---------------------------------------------------------
-# Classification
-# ---------------------------------------------------------
-def classify_resource(resource):
-    text = " ".join(
-        [
-            str(resource.get("source_portal", "")),
-            str(resource.get("package", "")),
-            str(resource.get("name", "")),
-            str(resource.get("package_notes", "")),
-            str(resource.get("matched_query", "")),
-        ]
-    ).lower()
-
-    shelter_keywords = [
-        "hayvan bakımevi", "hayvan bakimevi",
-        "geçici hayvan bakım merkezi", "gecici hayvan bakim merkezi",
-        "geçici hayvan bakımevi", "gecici hayvan bakimevi",
-        "hayvan bakım merkezi", "hayvan bakim merkezi",
-        "hayvan toplama merkezi", "toplama merkezi",
-        "sahipsiz hayvan rehabilitasyon", "rehabilitasyon merkezi",
-        "barınak", "barinak", "bakımevi", "bakimevi",
-        "animal shelter", "shelter",
-    ]
-
-    operation_keywords = [
-        "işlem sayıları", "islem sayilari",
-        "işlemleri", "islemleri",
-        "istatistik", "istatistikleri",
-        "yıllara göre", "yillara gore",
-        "denetim", "hanelerde",
-        "evcil hayvan", "evcil hayvan varlığı", "evcil hayvan varligi",
-        "evcil hayvan türleri", "evcil hayvan turleri",
-        "vektör", "vektor", "mücadele", "mucadele",
-        "sağlık kurum", "saglik kurum",
-        "vdym", "sayısı", "sayisi",
-        "number and capacities", "by years", "years",
-    ]
-
-    general_keywords = [
-        "hayvan", "veteriner", "sahipsiz",
-        "kısırlaştırma", "kisirlastirma", "rehabilitasyon",
-    ]
-
-    if any(k in text for k in shelter_keywords):
-        if any(k in text for k in operation_keywords):
-            return "operation_stats"
-        return "shelter_facility"
-
-    if any(k in text for k in operation_keywords):
-        return "operation_stats"
-
-    if any(k in text for k in general_keywords):
-        return "general_animal"
-
-    return "irrelevant"
-
-
-def resource_relevance_score(resource):
-    score_map = {
-        "shelter_facility": 100,
-        "operation_stats": 60,
-        "general_animal": 25,
-        "irrelevant": 0,
-    }
-    return score_map.get(classify_resource(resource), 0)
-
-
-def is_relevant_resource(resource):
-    return classify_resource(resource) in [
-        "shelter_facility",
-        "operation_stats",
-        "general_animal",
-    ]
-
-
-# ---------------------------------------------------------
-# Local
-# ---------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_local_data(path=LOCAL_FILE):
-    return pd.read_csv(path)
-
-
-# ---------------------------------------------------------
-# Single CKAN search query
-# ---------------------------------------------------------
-def _search_single_query(search_url, query, rows):
+def _get_secret(name: str, default: str = "") -> str:
     try:
-        data = safe_get_json(
-            search_url,
-            params={"q": query, "rows": rows},
-            timeout=HTTP_TIMEOUT,
-        )
+        import streamlit as st
+
+        value = st.secrets.get(name, default)
+        return str(value).strip() if value is not None else default
     except Exception:
-        return []
+        return os.getenv(name, default).strip()
 
-    out = []
-    results = data.get("result", {}).get("results", [])
 
-    for package in results:
-        package_title = package.get("title", "Veri Paketi")
-        package_name = package.get("name", "")
-        package_notes = package.get("notes", "")
-        package_created = package.get("metadata_created", "")
-        package_modified = package.get("metadata_modified", "")
+def _get_ckan_portals() -> list[str]:
+    raw = _get_secret("CKAN_PORTALS", "")
+    if raw:
+        portals = [x.strip().rstrip("/") for x in raw.split(",") if x.strip()]
+        if portals:
+            return portals
 
-        for res in package.get("resources", []):
-            url = res.get("url", "")
-            fmt = infer_format(res)
-            name = res.get("name", package_title)
+    return [x.rstrip("/") for x in DEFAULT_CKAN_PORTALS]
 
-            if not url or fmt not in {"csv", "xlsx", "xls", "json", "ods"}:
-                continue
 
-            item = {
-                "source_portal": "",
-                "package": package_title,
-                "package_name": package_name,
-                "package_notes": package_notes,
-                "name": name,
-                "format": fmt,
-                "url": url,
-                "resource_id": res.get("id", ""),
-                "package_created": package_created,
-                "package_modified": package_modified,
-                "resource_created": res.get("created", ""),
-                "resource_last_modified": res.get("last_modified", ""),
-                "resource_revision_timestamp": res.get("revision_timestamp", ""),
-                "matched_query": query,
+def _clean_col_name(col: Any) -> str:
+    s = str(col).strip().lower()
+    tr = str.maketrans("çğıöşüİ", "cgiosui")
+    s = s.translate(tr)
+    s = s.replace("\n", " ").replace("\r", " ")
+    s = " ".join(s.split())
+    return s
+
+
+def _first_existing(df: pd.DataFrame, aliases: list[str]) -> str | None:
+    cleaned = {_clean_col_name(c): c for c in df.columns}
+    for alias in aliases:
+        key = _clean_col_name(alias)
+        if key in cleaned:
+            return cleaned[key]
+    return None
+
+
+def _to_num(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(
+        series.astype(str)
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace(" ", "", regex=False),
+        errors="coerce",
+    )
+
+
+def _risk_level(score: float | None) -> str:
+    if score is None or pd.isna(score):
+        return "Veri yetersiz"
+    if score >= 80:
+        return "Kritik"
+    if score >= 60:
+        return "Yüksek"
+    if score >= 35:
+        return "Orta"
+    return "Düşük"
+
+
+def normalize_shelter_df(
+    df: pd.DataFrame,
+    source_portal: str = "",
+    source_dataset: str = "",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    name_col = _first_existing(
+        df,
+        [
+            "name",
+            "ad",
+            "adi",
+            "adı",
+            "barinak adi",
+            "barınak adı",
+            "tesis adi",
+            "tesis adı",
+            "kurum adi",
+            "kurum adı",
+        ],
+    )
+
+    city_col = _first_existing(
+        df,
+        [
+            "city",
+            "il",
+            "sehir",
+            "şehir",
+            "province",
+        ],
+    )
+
+    district_col = _first_existing(
+        df,
+        [
+            "district",
+            "ilce",
+            "ilçe",
+            "county",
+        ],
+    )
+
+    lat_col = _first_existing(
+        df,
+        [
+            "lat",
+            "latitude",
+            "enlem",
+            "y",
+            "koordinat y",
+        ],
+    )
+
+    lon_col = _first_existing(
+        df,
+        [
+            "lon",
+            "lng",
+            "long",
+            "longitude",
+            "boylam",
+            "x",
+            "koordinat x",
+        ],
+    )
+
+    capacity_col = _first_existing(
+        df,
+        [
+            "capacity",
+            "kapasite",
+            "hayvan kapasitesi",
+            "toplam kapasite",
+        ],
+    )
+
+    occupancy_col = _first_existing(
+        df,
+        [
+            "occupancy",
+            "mevcut",
+            "mevcut hayvan",
+            "hayvan sayisi",
+            "hayvan sayısı",
+            "sayi",
+            "sayı",
+        ],
+    )
+
+    risk_score_col = _first_existing(
+        df,
+        [
+            "risk_score",
+            "risk skoru",
+            "risk puani",
+            "risk puanı",
+        ],
+    )
+
+    risk_level_col = _first_existing(
+        df,
+        [
+            "risk_level",
+            "risk seviyesi",
+            "risk",
+        ],
+    )
+
+    out = pd.DataFrame()
+
+    if name_col:
+        out["name"] = df[name_col].astype(str).str.strip()
+    else:
+        out["name"] = "İsimsiz Barınak / Tesis"
+
+    if city_col:
+        out["city"] = df[city_col].astype(str).str.strip()
+    else:
+        out["city"] = ""
+
+    if district_col:
+        out["district"] = df[district_col].astype(str).str.strip()
+    else:
+        out["district"] = ""
+
+    if lat_col:
+        out["lat"] = _to_num(df[lat_col])
+    else:
+        out["lat"] = pd.NA
+
+    if lon_col:
+        out["lon"] = _to_num(df[lon_col])
+    else:
+        out["lon"] = pd.NA
+
+    if capacity_col:
+        out["capacity"] = _to_num(df[capacity_col])
+    else:
+        out["capacity"] = pd.NA
+
+    if occupancy_col:
+        out["occupancy"] = _to_num(df[occupancy_col])
+    else:
+        out["occupancy"] = pd.NA
+
+    if risk_score_col:
+        out["risk_score"] = _to_num(df[risk_score_col])
+    else:
+        cap = pd.to_numeric(out["capacity"], errors="coerce")
+        occ = pd.to_numeric(out["occupancy"], errors="coerce")
+
+        ratio = occ / cap
+        score = ratio * 70
+        score = score.where(cap.notna() & occ.notna() & (cap > 0), pd.NA)
+        out["risk_score"] = score.clip(lower=0, upper=100)
+
+    if risk_level_col:
+        out["risk_level"] = df[risk_level_col].astype(str).str.strip()
+        out["risk_level"] = out["risk_level"].replace(
+            {
+                "nan": "Veri yetersiz",
+                "None": "Veri yetersiz",
+                "": "Veri yetersiz",
             }
+        )
+    else:
+        out["risk_level"] = out["risk_score"].apply(_risk_level)
 
-            item["resource_category"] = classify_resource(item)
-            item["relevance_score"] = resource_relevance_score(item)
+    out["source_portal"] = source_portal or "Bilinmeyen kaynak"
+    out["source_dataset"] = source_dataset or ""
 
-            out.append(item)
+    out["name"] = out["name"].replace(
+        {
+            "nan": "İsimsiz Barınak / Tesis",
+            "None": "İsimsiz Barınak / Tesis",
+            "": "İsimsiz Barınak / Tesis",
+        }
+    )
+
+    valid_coordinate = (
+        pd.to_numeric(out["lat"], errors="coerce").between(-90, 90)
+        & pd.to_numeric(out["lon"], errors="coerce").between(-180, 180)
+    )
+
+    # Koordinatsız veriyi tamamen atma.
+    # Dashboardda görülebilsin ama haritada marker olmaz.
+    out["has_valid_coordinate"] = valid_coordinate
 
     return out
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def search_ckan_resources(base_url, query, rows=50, deep_queries=None):
-    """Tek bir CKAN portalında paralel sorgular."""
-    search_url = make_ckan_api_url(base_url)
-
-    queries = [query]
-    if deep_queries:
-        queries.extend(deep_queries)
-    queries = list(dict.fromkeys([q for q in queries if q]))
-
-    all_items = []
-    seen_urls = set()
-
-    with ThreadPoolExecutor(max_workers=CKAN_SEARCH_WORKERS) as executor:
-        futures = {
-            executor.submit(_search_single_query, search_url, q, rows): q
-            for q in queries
-        }
-
-        for future in as_completed(futures):
-            try:
-                items = future.result(timeout=HTTP_TIMEOUT * 2)
-            except Exception:
-                continue
-
-            for item in items:
-                url = item.get("url", "")
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                item["source_base"] = base_url
-                all_items.append(item)
-
-    all_items = [r for r in all_items if is_relevant_resource(r)]
-
-    all_items.sort(
-        key=lambda r: (
-            int(r.get("relevance_score", 0)),
-            str(r.get("resource_last_modified", "")),
-            str(r.get("resource_revision_timestamp", "")),
-            str(r.get("package_modified", "")),
-        ),
-        reverse=True,
-    )
-
-    return all_items
-
-
-# ---------------------------------------------------------
-# Multi-portal CKAN search
-# ---------------------------------------------------------
-def _search_one_portal(source_name, source_config, rows_per_query):
-    try:
-        resources = search_ckan_resources(
-            base_url=source_config["base"],
-            query=source_config["query"],
-            rows=rows_per_query,
-            deep_queries=source_config.get("deep_queries", COMMON_DEEP_QUERIES),
-        )
-    except Exception:
-        return source_name, []
-
-    for r in resources:
-        r["source_portal"] = source_name
-        r["source_base"] = source_config["base"]
-        r["resource_category"] = classify_resource(r)
-        r["relevance_score"] = resource_relevance_score(r)
-
-    return source_name, resources
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def search_turkiye_ckan_resources(rows_per_query=50):
-    """Türkiye geneli paralel CKAN taraması (cache'li)."""
-    return _search_turkiye_ckan_internal(rows_per_query=rows_per_query)
-
-
-def search_turkiye_ckan_resources_with_progress(
-    rows_per_query=50,
-    on_portal_done=None,
-):
-    """Callback'li paralel tarama. on_portal_done(portal_name, idx, total) çağrılır."""
-    return _search_turkiye_ckan_internal(
-        rows_per_query=rows_per_query,
-        on_portal_done=on_portal_done,
+def load_demo_data(path: str = DEMO_CSV_PATH) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    return normalize_shelter_df(
+        df,
+        source_portal=f"Stabil Demo CSV · {path}",
+        source_dataset=os.path.basename(path),
     )
 
 
-def _search_turkiye_ckan_internal(rows_per_query=50, on_portal_done=None):
-    all_resources = []
-    seen_urls = set()
-    portal_items = list(TURKIYE_CKAN_SOURCES.items())
-    total = len(portal_items)
+def _ckan_action_url(portal: str, action: str) -> str:
+    portal = portal.rstrip("/") + "/"
+    return urljoin(portal, f"api/3/action/{action}")
 
-    with ThreadPoolExecutor(max_workers=CKAN_SEARCH_WORKERS) as executor:
-        futures = {
-            executor.submit(
-                _search_one_portal,
-                source_name,
-                source_config,
-                rows_per_query,
-            ): source_name
-            for source_name, source_config in portal_items
-        }
 
-        done = 0
-        for future in as_completed(futures):
-            done += 1
-            portal_name = futures[future]
+def _safe_get_json(url: str, params: dict[str, Any] | None = None, timeout: int = 20):
+    r = requests.get(
+        url,
+        params=params or {},
+        timeout=timeout,
+        headers={
+            "User-Agent": "SmartShelter-GIS/1.0",
+            "Accept": "application/json",
+        },
+    )
+    r.raise_for_status()
+    data = r.json()
 
-            try:
-                _, resources = future.result(timeout=120)
-            except Exception:
-                resources = []
+    if not data.get("success", False):
+        raise RuntimeError(data.get("error", "CKAN success=false"))
 
-            if on_portal_done:
-                try:
-                    on_portal_done(portal_name, done, total)
-                except Exception:
-                    pass
+    return data.get("result")
 
-            for r in resources:
-                url = r.get("url", "")
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                all_resources.append(r)
 
-    all_resources.sort(
-        key=lambda r: (
-            int(r.get("relevance_score", 0)),
-            str(r.get("source_portal", "")),
-            str(r.get("resource_last_modified", "")),
-            str(r.get("package_modified", "")),
-        ),
-        reverse=True,
+def _search_packages(portal: str, keyword: str, rows: int = 10) -> list[dict[str, Any]]:
+    url = _ckan_action_url(portal, "package_search")
+    result = _safe_get_json(
+        url,
+        params={
+            "q": keyword,
+            "rows": rows,
+        },
+    )
+    return result.get("results", []) if isinstance(result, dict) else []
+
+
+def _read_resource_from_datastore(portal: str, resource_id: str) -> pd.DataFrame:
+    url = _ckan_action_url(portal, "datastore_search")
+    result = _safe_get_json(
+        url,
+        params={
+            "resource_id": resource_id,
+            "limit": 5000,
+        },
     )
 
-    return all_resources
+    records = result.get("records", []) if isinstance(result, dict) else []
+    return pd.DataFrame(records)
 
 
-# ---------------------------------------------------------
-# Resource loaders
-# ---------------------------------------------------------
-def _read_csv_smart(content_bytes):
-    for encoding in ["utf-8", "utf-8-sig", "cp1254", "iso-8859-9", "latin-1"]:
+def _read_resource_url(url: str, fmt: str) -> pd.DataFrame:
+    fmt = (fmt or "").lower().strip()
+
+    r = requests.get(
+        url,
+        timeout=35,
+        headers={
+            "User-Agent": "SmartShelter-GIS/1.0",
+        },
+    )
+    r.raise_for_status()
+
+    content = r.content
+
+    if fmt == "csv" or url.lower().split("?")[0].endswith(".csv"):
+        text = content.decode("utf-8-sig", errors="replace")
         try:
-            return pd.read_csv(io.BytesIO(content_bytes), encoding=encoding)
+            return pd.read_csv(StringIO(text))
         except Exception:
-            continue
+            return pd.read_csv(StringIO(text), sep=";")
 
-    try:
-        return pd.read_csv(io.BytesIO(content_bytes), encoding="utf-8", errors="ignore")
-    except Exception:
-        return pd.DataFrame()
+    if fmt in ("xlsx", "xls") or url.lower().split("?")[0].endswith((".xlsx", ".xls")):
+        return pd.read_excel(BytesIO(content))
 
-
-def _read_excel_smart(content_bytes, engine=None):
-    try:
-        if engine:
-            return pd.read_excel(io.BytesIO(content_bytes), engine=engine)
-        return pd.read_excel(io.BytesIO(content_bytes))
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_resource(resource):
-    fmt = resource.get("format", "")
-    url = resource.get("url", "")
-
-    if not url:
-        return pd.DataFrame()
-
-    try:
-        content = safe_get_bytes(url)
-    except Exception:
-        return pd.DataFrame()
-
-    if fmt == "csv":
-        return _read_csv_smart(content)
-
-    if fmt in ["xlsx", "xls"]:
-        return _read_excel_smart(content)
-
-    if fmt == "ods":
-        return _read_excel_smart(content, engine="odf")
-
-    if fmt == "json":
-        try:
-            return pd.read_json(io.BytesIO(content))
-        except Exception:
-            pass
-
-        try:
-            import json
-            data = json.loads(content.decode("utf-8", errors="ignore"))
-        except Exception:
-            return pd.DataFrame()
+    if fmt in ("json", "geojson") or url.lower().split("?")[0].endswith((".json", ".geojson")):
+        data = r.json()
 
         if isinstance(data, list):
             return pd.DataFrame(data)
 
         if isinstance(data, dict):
-            if "records" in data and isinstance(data["records"], list):
-                return pd.DataFrame(data["records"])
-
-            if (
-                "result" in data
-                and isinstance(data["result"], dict)
-                and "records" in data["result"]
-            ):
-                return pd.DataFrame(data["result"]["records"])
-
             if "features" in data and isinstance(data["features"], list):
                 rows = []
-                for feature in data["features"]:
-                    props = feature.get("properties", {}) or {}
-                    geometry = feature.get("geometry", {}) or {}
+                for f in data["features"]:
+                    props = f.get("properties", {}) or {}
+                    geom = f.get("geometry", {}) or {}
+                    coords = geom.get("coordinates", [])
 
-                    if geometry.get("type") == "Point":
-                        coords = geometry.get("coordinates", [None, None])
+                    if (
+                        isinstance(coords, list)
+                        and len(coords) >= 2
+                        and geom.get("type") == "Point"
+                    ):
                         props["lon"] = coords[0]
                         props["lat"] = coords[1]
 
                     rows.append(props)
+
                 return pd.DataFrame(rows)
+
+            for key in ("records", "result", "data", "items"):
+                if key in data and isinstance(data[key], list):
+                    return pd.DataFrame(data[key])
 
             return pd.DataFrame([data])
 
     return pd.DataFrame()
 
 
-def load_resource_with_metadata(resource):
-    try:
-        df = load_resource(resource)
-    except Exception:
-        return pd.DataFrame()
+def _resource_format(resource: dict[str, Any]) -> str:
+    fmt = str(resource.get("format") or "").lower().strip()
+    if fmt:
+        return fmt
 
+    url = str(resource.get("url") or "").lower().split("?")[0]
+    for ext in SUPPORTED_FORMATS:
+        if url.endswith(f".{ext}"):
+            return ext
+
+    return ""
+
+
+def _resource_is_supported(resource: dict[str, Any]) -> bool:
+    fmt = _resource_format(resource)
+    url = str(resource.get("url") or "")
+    return bool(url) and fmt in SUPPORTED_FORMATS
+
+
+def load_ckan_data(
+    portals: list[str] | None = None,
+    keywords: list[str] | None = None,
+) -> DataLoadResult:
+    portals = portals or _get_ckan_portals()
+    keywords = keywords or CKAN_KEYWORDS
+
+    all_frames: list[pd.DataFrame] = []
+    errors: list[str] = []
+    debug = {
+        "portals": portals,
+        "keywords": keywords,
+        "packages_found": 0,
+        "resources_read": 0,
+        "rows_before_normalize": 0,
+        "rows_after_normalize": 0,
+    }
+
+    seen_resources: set[str] = set()
+
+    for portal in portals:
+        for keyword in keywords:
+            try:
+                packages = _search_packages(portal, keyword)
+                debug["packages_found"] += len(packages)
+            except Exception as e:
+                errors.append(f"{portal} · '{keyword}' araması başarısız: {e}")
+                continue
+
+            for package in packages:
+                package_title = package.get("title") or package.get("name") or ""
+                resources = package.get("resources", []) or []
+
+                for resource in resources:
+                    resource_id = str(resource.get("id") or "")
+                    resource_url = str(resource.get("url") or "")
+                    resource_key = resource_id or resource_url
+
+                    if not resource_key or resource_key in seen_resources:
+                        continue
+
+                    seen_resources.add(resource_key)
+
+                    if not _resource_is_supported(resource):
+                        continue
+
+                    fmt = _resource_format(resource)
+
+                    try:
+                        raw_df = pd.DataFrame()
+
+                        if resource.get("datastore_active") and resource_id:
+                            try:
+                                raw_df = _read_resource_from_datastore(portal, resource_id)
+                            except Exception:
+                                raw_df = pd.DataFrame()
+
+                        if raw_df.empty and resource_url:
+                            raw_df = _read_resource_url(resource_url, fmt)
+
+                        if raw_df.empty:
+                            continue
+
+                        debug["resources_read"] += 1
+                        debug["rows_before_normalize"] += len(raw_df)
+
+                        norm = normalize_shelter_df(
+                            raw_df,
+                            source_portal=portal,
+                            source_dataset=package_title,
+                        )
+
+                        if not norm.empty:
+                            all_frames.append(norm)
+
+                    except Exception as e:
+                        errors.append(
+                            f"{portal} · {package_title} · kaynak okunamadı: {e}"
+                        )
+
+    if not all_frames:
+        return DataLoadResult(
+            df=pd.DataFrame(),
+            source_label="Türkiye Geneli CKAN Taraması · veri alınamadı",
+            mode="Türkiye Geneli CKAN Taraması",
+            is_demo=False,
+            errors=errors or ["CKAN taramasında uygun veri bulunamadı."],
+            debug=debug,
+        )
+
+    df = pd.concat(all_frames, ignore_index=True)
+
+    # Basit tekrar temizliği
+    subset = [c for c in ["name", "city", "district", "lat", "lon"] if c in df.columns]
+    if subset:
+        df = df.drop_duplicates(subset=subset, keep="first")
+
+    debug["rows_after_normalize"] = len(df)
+
+    return DataLoadResult(
+        df=df,
+        source_label=f"Türkiye Geneli CKAN Taraması · {len(df)} kayıt",
+        mode="Türkiye Geneli CKAN Taraması",
+        is_demo=False,
+        errors=errors,
+        debug=debug,
+    )
+
+
+def apply_strict_mode(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
-    df = df.copy()
+    out = df.copy()
 
-    df["source_portal"] = resource.get("source_portal", "")
-    df["source_resource"] = (
-        f"{resource.get('package', '')} | {resource.get('name', '')}"
-    )
-    df["source_url"] = resource.get("url", "")
-    df["source_format"] = resource.get("format", "")
-    df["source_matched_query"] = resource.get("matched_query", "")
-    df["source_package_modified"] = resource.get("package_modified", "")
-    df["source_resource_last_modified"] = resource.get("resource_last_modified", "")
-    df["resource_category"] = resource.get("resource_category", "")
-    df["relevance_score"] = resource.get("relevance_score", 0)
+    if "has_valid_coordinate" in out.columns:
+        out = out[out["has_valid_coordinate"] == True]
 
-    return df
-
-
-def load_multiple_resources(resources, max_resources=20, allowed_categories=None, on_resource_done=None):
-    if allowed_categories is not None:
-        resources = [
-            r for r in resources
-            if r.get("resource_category") in allowed_categories
+    if "source_portal" in out.columns:
+        out = out[
+            out["source_portal"].notna()
+            & (out["source_portal"].astype(str).str.strip() != "")
         ]
 
-    targets = list(resources[:max_resources])
+    return out.reset_index(drop=True)
 
-    frames = []
-    loaded_resources = []
-    failed_resources = []
 
-    if not targets:
-        return pd.DataFrame(), loaded_resources, failed_resources
+def load_shelter_dataset(
+    mode: str,
+    strict_mode: bool = False,
+    demo_path: str = DEMO_CSV_PATH,
+) -> DataLoadResult:
+    """
+    Ana veri yükleme fonksiyonu.
 
-    total = len(targets)
+    Önemli:
+    - Demo seçiliyse demo yükler.
+    - CKAN seçiliyse CKAN yükler.
+    - CKAN hata verirse demo CSV'ye otomatik dönmez.
+    """
 
-    with ThreadPoolExecutor(max_workers=RESOURCE_LOAD_WORKERS) as executor:
-        futures = {
-            executor.submit(load_resource_with_metadata, resource): resource
-            for resource in targets
-        }
+    normalized_mode = str(mode or "").strip().lower()
 
-        done = 0
-        for future in as_completed(futures):
-            done += 1
-            resource = futures[future]
+    if "ckan" in normalized_mode or "türkiye" in normalized_mode or "turkiye" in normalized_mode:
+        result = load_ckan_data()
 
-            try:
-                df = future.result(timeout=60)
-            except Exception:
-                df = None
+        if strict_mode and not result.df.empty:
+            result.df = apply_strict_mode(result.df)
 
-            if on_resource_done:
-                try:
-                    on_resource_done(resource, done, total)
-                except Exception:
-                    pass
+        return result
 
-            if df is None or df.empty:
-                failed_resources.append(resource)
-                continue
+    try:
+        df = load_demo_data(demo_path)
 
-            frames.append(df)
-            loaded_resources.append(resource)
+        if strict_mode and not df.empty:
+            df = apply_strict_mode(df)
 
-    if not frames:
-        return pd.DataFrame(), loaded_resources, failed_resources
+        return DataLoadResult(
+            df=df,
+            source_label=f"Stabil Demo CSV · {demo_path}",
+            mode="Stabil Demo CSV",
+            is_demo=True,
+            errors=[],
+            debug={"demo_path": demo_path, "rows": len(df)},
+        )
 
-    combined = pd.concat(frames, ignore_index=True, sort=False)
+    except Exception as e:
+        return DataLoadResult(
+            df=pd.DataFrame(),
+            source_label=f"Stabil Demo CSV · okunamadı",
+            mode="Stabil Demo CSV",
+            is_demo=True,
+            errors=[str(e)],
+            debug={"demo_path": demo_path},
+        )
 
-    return combined, loaded_resources, failed_resources
+
+# Eski importları kırmamak için alias fonksiyonlar
+def load_data(
+    mode: str = "Stabil Demo CSV",
+    strict_mode: bool = False,
+) -> DataLoadResult:
+    return load_shelter_dataset(mode=mode, strict_mode=strict_mode)
+
+
+def get_data(
+    mode: str = "Stabil Demo CSV",
+    strict_mode: bool = False,
+) -> DataLoadResult:
+    return load_shelter_dataset(mode=mode, strict_mode=strict_mode)
