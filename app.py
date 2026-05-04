@@ -1316,7 +1316,7 @@ elif mode == "Türkiye Geneli CKAN Taraması":
                     for r in resources_for_selection
                 ]
 
-                                default_count = min(max_resources_to_load, len(labels))
+                default_count = min(max_resources_to_load, len(labels))
 
                 selected_indices = st.sidebar.multiselect(
                     "İçeri alınacak resource seç",
