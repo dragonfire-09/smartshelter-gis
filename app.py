@@ -561,8 +561,22 @@ def main():
         st.sidebar.multiselect("İlçe seç", districts, default=districts) if use_district else districts
     )
 
-    selected_risks = st.sidebar.multiselect("Risk seviyesi", risk_levels, default=risk_levels)
+    # Default olarak "Veri yetersiz" hariç tüm seviyeleri seç
+default_risks = [r for r in risk_levels if r != "Veri yetersiz"]
+if not default_risks:  # eğer hepsi "Veri yetersiz" ise hepsini göster
+    default_risks = risk_levels
 
+selected_risks = st.sidebar.multiselect(
+    "Risk seviyesi", 
+    risk_levels, 
+    default=default_risks if default_risks else risk_levels
+)
+
+# Eğer hiçbir risk seçilmediyse uyar ve tümünü göster
+if not selected_risks:
+    st.sidebar.info("ℹ️ Risk filtresi boş — tüm kayıtlar gösteriliyor.")
+    selected_risks = risk_levels
+    
     # Filtre uygula
     filtered = df[
         df["city"].astype(str).isin(selected_cities)
