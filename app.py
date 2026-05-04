@@ -1,905 +1,907 @@
-"""
-SmartShelter GIS - Ana Uygulama
-================================
-Hayvan bakımevi izleme, risk önceliklendirme ve GIS karar destek paneli.
-"""
-from io import BytesIO
+from __future__ import annotations
+
+import os
+import sys
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
-from streamlit_folium import st_folium
 
-from src.ai_insights import (
-    calculate_data_quality_score,
-    detect_anomalies,
-    generate_executive_summary,
-    generate_risk_explanations,
-    simulate_interventions,
-)
-from src.charts import (
-    build_district_summary,
-    chart_district_avg_risk,
-    chart_history_metric,
-    chart_history_trend,
-    chart_occupancy_rate,
-    chart_record_delta,
-    chart_risk_score,
-)
-from src.data_loader import (
-    CKAN_SOURCES,
-    LOCAL_FILE,
-    TURKIYE_CKAN_SOURCES,
-    load_local_data,
-    load_multiple_resources,
-    load_resource,
-    search_ckan_resources,
-    search_turkiye_ckan_resources,
-    search_turkiye_ckan_resources_with_progress,
-)
-from src.history import (
-    append_snapshot,
-    build_history_summary,
-    compare_snapshot_dates,
-    compare_summary,
-    get_available_snapshot_dates,
-)
-from src.map import create_shelter_map
-from src.normalize import normalize_columns
-from src.risk import calculate_risk, create_action_recommendations
 
-# =========================================================
-# CONFIG
-# =========================================================
+# =============================================================================
+# Path / import hazırlığı
+# =============================================================================
+
+ROOT_DIR = Path(__file__).resolve().parent
+
+# Sende dosya yapısı büyük ihtimalle:
+# app.py
+# src/
+#   src/
+#     map.py
+#     data_loader.py
+#
+# Aşağıdaki path eklemeleri farklı import senaryolarını tolere eder.
+CANDIDATE_PATHS = [
+    ROOT_DIR,
+    ROOT_DIR / "src",
+    ROOT_DIR / "src" / "src",
+]
+
+for p in CANDIDATE_PATHS:
+    if p.exists() and str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+
+def _import_project_modules():
+    """
+    Projedeki data_loader ve map modüllerini farklı path yapılarında bulmaya çalışır.
+    """
+    load_shelter_dataset = None
+    create_shelter_map = None
+
+    loader_errors = []
+    map_errors = []
+
+    # data_loader import denemeleri
+    loader_imports = [
+        "src.data_loader",
+        "src.src.data_loader",
+        "data_loader",
+    ]
+
+    for module_name in loader_imports:
+        try:
+            module = __import__(module_name, fromlist=["load_shelter_dataset"])
+            load_shelter_dataset = getattr(module, "load_shelter_dataset")
+            break
+        except Exception as e:
+            loader_errors.append(f"{module_name}: {e}")
+
+    # map import denemeleri
+    map_imports = [
+        "src.map",
+        "src.src.map",
+        "map",
+    ]
+
+    for module_name in map_imports:
+        try:
+            module = __import__(module_name, fromlist=["create_shelter_map"])
+            create_shelter_map = getattr(module, "create_shelter_map")
+            break
+        except Exception as e:
+            map_errors.append(f"{module_name}: {e}")
+
+    if load_shelter_dataset is None:
+        st.error("`load_shelter_dataset` import edilemedi.")
+        with st.expander("Import hata detayları", expanded=True):
+            st.write(loader_errors)
+            st.write("sys.path:", sys.path)
+        st.stop()
+
+    if create_shelter_map is None:
+        st.error("`create_shelter_map` import edilemedi.")
+        with st.expander("Import hata detayları", expanded=True):
+            st.write(map_errors)
+            st.write("sys.path:", sys.path)
+        st.stop()
+
+    return load_shelter_dataset, create_shelter_map
+
+
+load_shelter_dataset, create_shelter_map = _import_project_modules()
+
+
+try:
+    from streamlit_folium import st_folium
+except Exception:
+    st_folium = None
+
+
+# =============================================================================
+# Streamlit ayarları
+# =============================================================================
+
 st.set_page_config(
     page_title="SmartShelter GIS",
     page_icon="🐾",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-HISTORY_FILE = Path("data/history/shelter_history.csv")
-RISK_LEVEL_ORDER = ["Düşük", "Orta", "Yüksek", "Kritik", "Veri yetersiz"]
-MAX_MAP_POINTS = 5000
+
+# =============================================================================
+# CSS
+# =============================================================================
+
+st.markdown(
+    """
+    <style>
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 2rem;
+        }
+
+        [data-testid="stSidebar"] {
+            background: #f8fafc;
+        }
+
+        .main-header {
+            background: linear-gradient(135deg, #1e3a8a 0%, #172554 100%);
+            padding: 1.4rem 1.6rem;
+            border-radius: 18px;
+            color: white;
+            margin-bottom: 1.2rem;
+        }
+
+        .main-header h1 {
+            margin: 0;
+            font-size: 2rem;
+            line-height: 1.15;
+        }
+
+        .main-header p {
+            margin: 0.45rem 0 0 0;
+            color: #dbeafe;
+            font-size: 0.98rem;
+        }
+
+        .metric-card {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 1rem 1.1rem;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+        }
+
+        .metric-label {
+            color: #64748b;
+            font-size: 0.88rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .metric-value {
+            color: #0f172a;
+            font-size: 1.9rem;
+            font-weight: 800;
+            line-height: 1.1;
+        }
+
+        .section-title {
+            margin-top: 1rem;
+            margin-bottom: 0.25rem;
+            font-size: 1.45rem;
+            font-weight: 800;
+            color: #0f172a;
+        }
+
+        .section-subtitle {
+            color: #94a3b8;
+            margin-bottom: 1rem;
+        }
+
+        .source-ok {
+            background: #ecfdf5;
+            border: 1px solid #bbf7d0;
+            color: #166534;
+            padding: 0.9rem 1rem;
+            border-radius: 12px;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .source-warn {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            color: #9a3412;
+            padding: 0.9rem 1rem;
+            border-radius: 12px;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .source-error {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+            padding: 0.9rem 1rem;
+            border-radius: 12px;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        div[data-testid="stMetricValue"] {
+            font-size: 2rem;
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.4rem;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            padding: 0.5rem 1rem;
+            background: #f1f5f9;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
-# =========================================================
-# SESSION STATE BOOTSTRAP
-# =========================================================
-if "_initialized" not in st.session_state:
-    st.session_state["_initialized"] = True
-    st.session_state["last_mode"] = None
+# =============================================================================
+# Yardımcı fonksiyonlar
+# =============================================================================
+
+def _safe_num(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
 
 
-# =========================================================
-# CACHED LOADERS
-# =========================================================
-@st.cache_data(show_spinner=False)
-def cached_load_local_data(path):
-    return load_local_data(path)
+def _format_int(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return "0"
+        return f"{int(value):,}"
+    except Exception:
+        return "0"
 
 
-def to_resource_tuple(resource: dict) -> tuple:
-    safe_items = []
-    for k, v in resource.items():
-        if isinstance(v, (list, dict, set)):
-            safe_items.append((k, str(v)))
+def _format_float(value: Any, digits: int = 1) -> str:
+    try:
+        if pd.isna(value):
+            return "—"
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return "—"
+
+
+def _column_exists(df: pd.DataFrame, col: str) -> bool:
+    return df is not None and not df.empty and col in df.columns
+
+
+def _valid_coordinate_count(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+
+    lat_col = "lat" if "lat" in df.columns else "latitude" if "latitude" in df.columns else None
+    lon_col = "lon" if "lon" in df.columns else "longitude" if "longitude" in df.columns else None
+
+    if not lat_col or not lon_col:
+        return 0
+
+    lat = pd.to_numeric(df[lat_col], errors="coerce")
+    lon = pd.to_numeric(df[lon_col], errors="coerce")
+
+    valid = (
+        lat.notna()
+        & lon.notna()
+        & lat.between(-90, 90)
+        & lon.between(-180, 180)
+    )
+
+    return int(valid.sum())
+
+
+def _risk_order(values: list[str]) -> list[str]:
+    order = ["Düşük", "Orta", "Yüksek", "Kritik", "Veri yetersiz"]
+    known = [x for x in order if x in values]
+    unknown = sorted([x for x in values if x not in order])
+    return known + unknown
+
+
+def _clear_filter_state():
+    keys = [
+        "city_filter_enabled_v4",
+        "district_filter_enabled_v4",
+        "risk_filter_v4",
+        "city_filter_v4",
+        "district_filter_v4",
+        "search_text_v4",
+    ]
+
+    for key in keys:
+        if key in st.session_state:
+            del st.session_state[key]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _cached_load_data(mode: str, strict_mode: bool, cache_buster: int):
+    """
+    CKAN sorgularını ve demo CSV okumasını cache'ler.
+
+    cache_buster, kullanıcı 'Veriyi yeniden çek' dediğinde değişir.
+    """
+    return load_shelter_dataset(
+        mode=mode,
+        strict_mode=strict_mode,
+    )
+
+
+def _apply_dashboard_filters(
+    df: pd.DataFrame,
+    selected_cities: list[str] | None,
+    selected_districts: list[str] | None,
+    selected_risks: list[str] | None,
+    search_text: str,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+
+    if selected_cities and "city" in out.columns:
+        out = out[out["city"].astype(str).isin(selected_cities)]
+
+    if selected_districts and "district" in out.columns:
+        out = out[out["district"].astype(str).isin(selected_districts)]
+
+    if selected_risks and "risk_level" in out.columns:
+        out = out[out["risk_level"].astype(str).isin(selected_risks)]
+
+    if search_text and "name" in out.columns:
+        q = search_text.strip().lower()
+        if q:
+            out = out[out["name"].astype(str).str.lower().str.contains(q, na=False)]
+
+    return out.reset_index(drop=True)
+
+
+def _render_metric_cards(df: pd.DataFrame):
+    total_records = len(df) if df is not None else 0
+
+    risk_ready = 0
+    if _column_exists(df, "risk_score"):
+        risk_ready = int(pd.to_numeric(df["risk_score"], errors="coerce").notna().sum())
+
+    known_capacity = 0
+    if _column_exists(df, "capacity"):
+        known_capacity = pd.to_numeric(df["capacity"], errors="coerce").sum(skipna=True)
+
+    known_occupancy = 0
+    if _column_exists(df, "occupancy"):
+        known_occupancy = pd.to_numeric(df["occupancy"], errors="coerce").sum(skipna=True)
+
+    avg_risk = None
+    if _column_exists(df, "risk_score"):
+        avg_risk = pd.to_numeric(df["risk_score"], errors="coerce").mean()
+
+    valid_coords = _valid_coordinate_count(df)
+
+    cols = st.columns(6)
+
+    with cols[0]:
+        st.metric("Envanter Kaydı", _format_int(total_records))
+
+    with cols[1]:
+        st.metric("Risk Hazır", _format_int(risk_ready))
+
+    with cols[2]:
+        st.metric("Bilinen Kapasite", _format_int(known_capacity))
+
+    with cols[3]:
+        st.metric("Bilinen Mevcut", _format_int(known_occupancy))
+
+    with cols[4]:
+        st.metric("Ortalama Risk", _format_float(avg_risk, 1))
+
+    with cols[5]:
+        st.metric("Geçerli Koordinat", _format_int(valid_coords))
+
+
+def _render_filter_diagnostics(
+    raw_df: pd.DataFrame,
+    filtered_df: pd.DataFrame,
+    selected_cities: list[str] | None,
+    selected_districts: list[str] | None,
+    selected_risks: list[str] | None,
+):
+    total = len(raw_df) if raw_df is not None else 0
+    shown = len(filtered_df) if filtered_df is not None else 0
+
+    cities_count = raw_df["city"].nunique() if _column_exists(raw_df, "city") else 0
+    districts_count = raw_df["district"].nunique() if _column_exists(raw_df, "district") else 0
+    coord_count = _valid_coordinate_count(raw_df)
+
+    risk_counts = {}
+    if _column_exists(raw_df, "risk_level"):
+        risk_counts = raw_df["risk_level"].astype(str).value_counts().to_dict()
+
+    with st.expander(f"🔬 Filtre Teşhisi (Toplam: {total} → Görünen: {shown})", expanded=True):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.markdown("**Strict Mode Sonrası / Ham Veri:**")
+            st.write(f"- Toplam: **{total}**")
+            st.write(f"- Şehir: **{cities_count}**")
+            st.write(f"- İlçe: **{districts_count}**")
+            st.write(f"- Koordinatlı: **{coord_count}**")
+
+        with c2:
+            st.markdown("**Aktif Filtreler:**")
+            st.write(f"- İl: **{len(selected_cities) if selected_cities else 0} seçili**")
+            st.write(f"- İlçe: **{len(selected_districts) if selected_districts else 0} seçili**")
+            st.write(f"- Risk: **{len(selected_risks) if selected_risks else 0} seçili**")
+
+        with c3:
+            st.markdown("**Risk Seviyeleri:**")
+            if risk_counts:
+                for risk, count in risk_counts.items():
+                    st.write(f"- {risk}: **{count}**")
+            else:
+                st.write("- Risk verisi yok")
+
+
+def _render_map(df: pd.DataFrame):
+    if df is None or df.empty:
+        st.info("Haritada gösterilecek kayıt yok.")
+        return
+
+    coord_count = _valid_coordinate_count(df)
+
+    if coord_count == 0:
+        st.warning(
+            "Bu filtrelerde geçerli koordinatı olan kayıt yok. "
+            "Dashboard kayıtları görünebilir ama haritada marker oluşmaz."
+        )
+
+    m = create_shelter_map(
+        df,
+        default_tile="Stadia OSM Bright",
+    )
+
+    if st_folium is not None:
+        st_folium(
+            m,
+            width=None,
+            height=680,
+            returned_objects=[],
+            key="main_shelter_map_v4",
+        )
+    else:
+        st.warning(
+            "`streamlit-folium` paketi bulunamadı. "
+            "Harita HTML fallback ile gösteriliyor. "
+            "requirements.txt içine `streamlit-folium` eklemen önerilir."
+        )
+        import streamlit.components.v1 as components
+
+        components.html(
+            m.get_root().render(),
+            height=700,
+            scrolling=False,
+        )
+
+
+def _render_table(df: pd.DataFrame):
+    if df is None or df.empty:
+        st.info("Tabloda gösterilecek kayıt yok.")
+        return
+
+    preferred_cols = [
+        "name",
+        "city",
+        "district",
+        "capacity",
+        "occupancy",
+        "risk_score",
+        "risk_level",
+        "lat",
+        "lon",
+        "source_portal",
+        "source_dataset",
+    ]
+
+    cols = [c for c in preferred_cols if c in df.columns]
+    rest = [c for c in df.columns if c not in cols]
+    show_df = df[cols + rest].copy()
+
+    st.dataframe(
+        show_df,
+        use_container_width=True,
+        height=480,
+    )
+
+    csv = show_df.to_csv(index=False).encode("utf-8-sig")
+
+    st.download_button(
+        "⬇️ CSV indir",
+        data=csv,
+        file_name="smartshelter_filtered_data.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+def _render_risk_summary(df: pd.DataFrame):
+    if df is None or df.empty:
+        st.info("Özet üretilecek kayıt yok.")
+        return
+
+    c1, c2 = st.columns([1, 1])
+
+    with c1:
+        st.subheader("Risk Dağılımı")
+
+        if "risk_level" in df.columns:
+            risk_counts = (
+                df["risk_level"]
+                .astype(str)
+                .value_counts()
+                .rename_axis("Risk Seviyesi")
+                .reset_index(name="Kayıt")
+            )
+
+            st.bar_chart(
+                risk_counts.set_index("Risk Seviyesi"),
+                use_container_width=True,
+            )
+            st.dataframe(risk_counts, use_container_width=True)
         else:
-            safe_items.append((k, v))
-    return tuple(sorted(safe_items, key=lambda kv: kv[0]))
+            st.info("risk_level kolonu yok.")
+
+    with c2:
+        st.subheader("Şehir Dağılımı")
+
+        if "city" in df.columns:
+            city_counts = (
+                df["city"]
+                .astype(str)
+                .replace({"": "Bilinmiyor", "nan": "Bilinmiyor"})
+                .value_counts()
+                .head(20)
+                .rename_axis("Şehir")
+                .reset_index(name="Kayıt")
+            )
+
+            st.bar_chart(
+                city_counts.set_index("Şehir"),
+                use_container_width=True,
+            )
+            st.dataframe(city_counts, use_container_width=True)
+        else:
+            st.info("city kolonu yok.")
 
 
-def clear_filter_state():
-    """Filtre ile ilgili tüm session state'i sil."""
-    keys_to_remove = [
-        k for k in list(st.session_state.keys())
-        if k.startswith("flt_")
-    ]
-    for k in keys_to_remove:
-        del st.session_state[k]
+# =============================================================================
+# Header
+# =============================================================================
+
+st.markdown(
+    """
+    <div class="main-header">
+        <h1>🐾 SmartShelter GIS Dashboard</h1>
+        <p>
+            Hayvan barınakları için kapasite, risk, konum ve veri kaynağı izleme paneli.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
-def clear_data_cache():
-    """Veri cache'lerini sil."""
-    keys_to_remove = [
-        k for k in list(st.session_state.keys())
-        if k.startswith("ckan_search_cache_") or k.startswith("resources_loaded_")
-    ]
-    for k in keys_to_remove:
-        del st.session_state[k]
+# =============================================================================
+# Sidebar - kaynak seçimi
+# =============================================================================
+
+with st.sidebar:
+    st.header("Veri Kaynağı")
+
+    data_mode = st.radio(
+        "Veri modu",
+        [
+            "Stabil Demo CSV",
+            "Türkiye Geneli CKAN Taraması",
+        ],
+        index=0,
+        key="data_mode_v4",
+    )
+
+    st.divider()
+
+    st.subheader("🔒 Veri Kalitesi Modu")
+
+    strict_mode = st.toggle(
+        "Strict Mode (Sadece Gerçek Veri)",
+        value=False,
+        help=(
+            "Açıksa sadece koordinatı/kaynağı geçerli kayıtları tutar. "
+            "Kapalıyken eksik CKAN kayıtları dashboardda kalabilir; "
+            "koordinatsız olanlar sadece haritada görünmez."
+        ),
+        key="strict_mode_v4",
+    )
+
+    st.caption(
+        "Not: CKAN seçiliyken veri alınamazsa demo CSV'ye otomatik dönülmez; "
+        "hata/debug ekranda gösterilir."
+    )
+
+    st.divider()
+
+    if "cache_buster_v4" not in st.session_state:
+        st.session_state["cache_buster_v4"] = 0
+
+    if st.button("🔄 Veriyi yeniden çek", use_container_width=True):
+        st.session_state["cache_buster_v4"] += 1
+        st.cache_data.clear()
+        st.rerun()
+
+    if st.button("🧹 Filtreleri sıfırla", use_container_width=True):
+        _clear_filter_state()
+        st.rerun()
 
 
-# =========================================================
-# UI HELPERS
-# =========================================================
-def inject_css():
+# =============================================================================
+# Veri yükleme
+# =============================================================================
+
+with st.spinner("Veri yükleniyor..."):
+    data_result = _cached_load_data(
+        mode=data_mode,
+        strict_mode=strict_mode,
+        cache_buster=st.session_state.get("cache_buster_v4", 0),
+    )
+
+raw_df = data_result.df if hasattr(data_result, "df") else pd.DataFrame()
+
+source_label = getattr(data_result, "source_label", "Bilinmeyen kaynak")
+is_demo = bool(getattr(data_result, "is_demo", False))
+errors = getattr(data_result, "errors", []) or []
+debug = getattr(data_result, "debug", {}) or {}
+
+
+# =============================================================================
+# Kaynak durumu
+# =============================================================================
+
+if errors and not is_demo:
     st.markdown(
-        """
-        <style>
-        .main .block-container { padding-top: 1.2rem; max-width: 1500px; }
-        .hero {
-            background: linear-gradient(135deg, #1e3a8a 0%, #0f172a 100%);
-            border-radius: 12px; padding: 1.5rem; color: white; margin-bottom: 1rem;
-        }
-        .hero-title { font-size: 1.8rem; font-weight: 700; }
-        .hero-subtitle { opacity: 0.85; margin-top: 0.5rem; }
-        .hero-badges { margin-top: 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem; }
-        .pill {
-            background: rgba(255,255,255,0.12); padding: 0.3rem 0.8rem;
-            border-radius: 999px; font-size: 0.85rem;
-        }
-        .section-title { font-size: 1.3rem; font-weight: 600; margin-top: 1rem; }
-        .section-caption { color: #94a3b8; font-size: 0.9rem; margin-bottom: 0.8rem; }
-        </style>
+        f"""
+        <div class="source-error">
+            ❌ Aktif kaynak: {source_label}
+        </div>
         """,
         unsafe_allow_html=True,
     )
 
+    with st.expander("CKAN hata / debug detayları", expanded=True):
+        st.write("Hatalar:")
+        st.write(errors)
+        st.write("Debug:")
+        st.write(debug)
 
-def render_hero():
+elif errors and is_demo:
     st.markdown(
-        """
-        <div class="hero">
-            <div class="hero-title">🐾 SmartShelter GIS</div>
-            <div class="hero-subtitle">
-                Açık veri tabanlı hayvan bakımevi izleme, risk önceliklendirme,
-                veri kalite analizi ve GIS karar destek paneli.
-            </div>
-            <div class="hero-badges">
-                <span class="pill">📍 GIS Harita</span>
-                <span class="pill">⚠️ Risk Skoru</span>
-                <span class="pill">🧠 AI Analiz</span>
-                <span class="pill">📊 CKAN Açık Veri</span>
-                <span class="pill">🔒 Strict Mode</span>
-            </div>
+        f"""
+        <div class="source-warn">
+            ⚠️ Aktif kaynak: {source_label}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Demo veri hata / debug detayları", expanded=False):
+        st.write(errors)
+        st.write(debug)
+
+else:
+    st.markdown(
+        f"""
+        <div class="source-ok">
+            ✅ Aktif kaynak: {source_label}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def section_header(title: str, caption: str = ""):
-    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
-    if caption:
-        st.markdown(f'<div class="section-caption">{caption}</div>', unsafe_allow_html=True)
-
-
-def as_bool_series(series):
-    if series is None:
-        return pd.Series(dtype=bool)
-    if series.dtype == bool:
-        return series.fillna(False)
-    return (
-        series.astype(str).str.strip().str.lower()
-        .isin(["true", "1", "yes", "evet", "var", "available"])
+if raw_df is None or raw_df.empty:
+    st.warning(
+        "Görüntülenecek kayıt yok. "
+        "Eğer CKAN modundaysan, debug detaylarında hangi portal/kaynakların denendiğini kontrol et."
     )
 
+    with st.expander("Boş veri debug bilgisi", expanded=True):
+        st.write("data_mode:", data_mode)
+        st.write("strict_mode:", strict_mode)
+        st.write("source_label:", source_label)
+        st.write("errors:", errors)
+        st.write("debug:", debug)
 
-# =========================================================
-# ENSURE APP COLUMNS
-# =========================================================
-def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Eksik sütunları güvenli default'larla doldur ve flag'leri compute et."""
-    df = df.copy()
-
-    string_defaults = {
-        "name": pd.NA, "city": pd.NA, "district": pd.NA,
-        "source_portal": "", "source_resource": "", "source_url": "",
-        "resource_category": "unknown", "data_scope": "unknown",
-        "risk_level": "Veri yetersiz", "recommended_action": "",
-        "risk_explanation": "", "data_quality_level": "Bilinmiyor",
-        "data_quality_note": "", "analytics_exclusion_reason": "",
-    }
-    for col, default in string_defaults.items():
-        if col not in df.columns:
-            df[col] = default
-
-    numeric_cols = [
-        "capacity", "occupancy", "vet_count", "sterilization_count",
-        "adoption_count", "occupancy_rate", "animals_per_vet",
-        "risk_score", "data_quality_score", "lat", "lon", "latitude", "longitude",
-    ]
-    for col in numeric_cols:
-        if col not in df.columns:
-            df[col] = pd.NA
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    if df["lat"].isna().all() and not df["latitude"].isna().all():
-        df["lat"] = df["latitude"]
-    if df["lon"].isna().all() and not df["longitude"].isna().all():
-        df["lon"] = df["longitude"]
-
-    # ---- İsim akıllı türetme ----
-    name_alt_cols = [
-        "adi", "adı", "ad", "tesis_adi", "tesis_adı",
-        "kurum_adi", "kurum_adı", "merkez_adi", "merkez_adı",
-        "title", "isim", "barinak_adi", "barınak_adı",
-        "label", "mahalle", "mahalle_adi", "mahalle_adı",
-        "sokak", "cadde",
-    ]
-
-    def clean_str_series(s):
-        out = s.astype(str).str.strip()
-        out = out.replace({"nan": "", "None": "", "<NA>": "", "NaN": ""})
-        return out
-
-    name_clean = clean_str_series(df["name"])
-
-    for col in name_alt_cols:
-        if col in df.columns:
-            mask = name_clean.eq("")
-            if mask.any():
-                alt = clean_str_series(df[col])
-                name_clean = name_clean.where(~mask, alt)
-
-    mask = name_clean.eq("")
-    if mask.any():
-        district_s = clean_str_series(df["district"])
-        city_s = clean_str_series(df["city"])
-        portal_s = clean_str_series(df["source_portal"])
-
-        def combine_loc(d, c, p):
-            parts = [x for x in [d, c] if x]
-            loc = " / ".join(parts)
-            if loc and p:
-                return f"{p} · {loc}"
-            if loc:
-                return loc
-            if p:
-                return f"{p} kaydı"
-            return ""
-
-        derived = pd.Series(
-            [combine_loc(d, c, p) for d, c, p in zip(district_s, city_s, portal_s)],
-            index=df.index,
-        )
-        name_clean = name_clean.where(~mask, derived)
-
-    mask = name_clean.eq("")
-    if mask.any():
-        lat_s = pd.to_numeric(df["lat"], errors="coerce")
-        lon_s = pd.to_numeric(df["lon"], errors="coerce")
-        coord_label = pd.Series(
-            [
-                f"Kayıt @ {la:.3f}, {lo:.3f}" if pd.notna(la) and pd.notna(lo) else ""
-                for la, lo in zip(lat_s, lon_s)
-            ],
-            index=df.index,
-        )
-        name_clean = name_clean.where(~mask, coord_label)
-
-    df["name"] = name_clean
-
-    bool_flags = [
-        "name_available", "city_available", "capacity_available",
-        "occupancy_available", "vet_count_available", "coordinate_valid",
-        "analytics_eligible", "risk_eligible",
-    ]
-    for flag in bool_flags:
-        if flag not in df.columns:
-            df[flag] = False
-        else:
-            df[flag] = as_bool_series(df[flag])
-
-    df["name_available"] = df["name"].astype(str).str.strip().ne("")
-    df["coordinate_valid"] = (
-        df["lat"].between(-90, 90, inclusive="both")
-        & df["lon"].between(-180, 180, inclusive="both")
-    )
-    df["capacity_available"] = df["capacity"].notna() & (df["capacity"] > 0)
-    df["occupancy_available"] = df["occupancy"].notna()
-    df["risk_eligible"] = df["capacity_available"] & df["occupancy_available"]
-
-    df["data_scope"] = "metadata_only"
-    df.loc[df["coordinate_valid"], "data_scope"] = "location_only"
-    df.loc[df["risk_eligible"], "data_scope"] = "capacity_only"
-    df.loc[df["risk_eligible"] & df["coordinate_valid"], "data_scope"] = "risk_ready"
-
-    return df
+    st.stop()
 
 
-# =========================================================
-# CKAN TARAMA — PROGRESS BAR
-# =========================================================
-def search_turkiye_with_progress(rows_per_query):
-    cache_key = f"ckan_search_cache_{rows_per_query}"
-    if cache_key in st.session_state:
-        cached = st.session_state[cache_key]
-        st.success(f"⚡ Önbellek kullanıldı · {len(cached)} resource (yeniden tarama yok)")
-        return cached
+# =============================================================================
+# Sidebar - filtreler
+# =============================================================================
 
-    total_portals = len(TURKIYE_CKAN_SOURCES)
+with st.sidebar:
+    st.header("🔎 Filtreler")
 
-    st.markdown("#### 🇹🇷 Türkiye Geneli CKAN Taraması")
-    info_box = st.empty()
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
-
-    info_box.info(f"🔄 {total_portals} portal paralel olarak taranıyor...")
-
-    portal_log = []
-
-    def on_portal_done(portal_name, current, total):
-        try:
-            ratio = min(max(current / max(total, 1), 0.0), 1.0)
-            progress_bar.progress(ratio)
-            portal_log.append(f"✅ {portal_name}")
-            recent = portal_log[-5:]
-            status_text.markdown(
-                f"**{current}/{total}** portal tamamlandı · Son tamamlananlar:\n\n"
-                + "\n".join(f"- {p}" for p in recent)
-            )
-        except Exception:
-            pass
-
-    try:
-        result = search_turkiye_ckan_resources_with_progress(
-            rows_per_query=rows_per_query,
-            on_portal_done=on_portal_done,
-        )
-    except Exception as e:
-        status_text.error(f"❌ Tarama hatası: {e}")
-        result = []
-
-    progress_bar.progress(1.0)
-
-    if isinstance(result, pd.DataFrame):
-        df = result.copy()
-    elif isinstance(result, list):
-        df = pd.DataFrame(result) if result else pd.DataFrame()
-    else:
-        df = pd.DataFrame()
-
-    info_box.success(
-        f"✅ Tarama tamamlandı: **{len(df)}** uygun resource bulundu "
-        f"({total_portals} portal tarandı)"
-    )
-    status_text.empty()
-
-    st.session_state[cache_key] = df
-    return df
-
-
-def load_resources_with_progress(candidate_records, max_resources):
-    urls = tuple(sorted(r.get("url", "") for r in candidate_records[:max_resources]))
-    cache_key = f"resources_loaded_{hash(urls)}_{max_resources}"
-
-    if cache_key in st.session_state:
-        cached = st.session_state[cache_key]
-        st.success(f"⚡ Önbellek kullanıldı · {len(cached[1])} resource yüklü")
-        return cached
-
-    total = min(max_resources, len(candidate_records))
-
-    st.markdown("#### 📥 Resource'lar İndiriliyor")
-    info_box = st.empty()
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
-
-    info_box.info(f"🔄 {total} resource paralel olarak indiriliyor...")
-
-    download_log = []
-
-    def on_resource_done(resource, done, total_n):
-        try:
-            ratio = min(max(done / max(total_n, 1), 0.0), 1.0)
-            progress_bar.progress(ratio)
-            portal = resource.get("source_portal", "?")
-            name = resource.get("name", "?")[:50]
-            fmt = str(resource.get("format", "")).upper()
-            download_log.append(f"📦 [{portal}] {name} ({fmt})")
-            recent = download_log[-5:]
-            status_text.markdown(
-                f"**{done}/{total_n}** resource indirildi · Son tamamlananlar:\n\n"
-                + "\n".join(f"- {p}" for p in recent)
-            )
-        except Exception:
-            pass
-
-    try:
-        result = load_multiple_resources(
-            candidate_records,
-            max_resources=max_resources,
-            on_resource_done=on_resource_done,
-        )
-        if isinstance(result, tuple) and len(result) == 3:
-            df_loaded, loaded_info, failed = result
-        elif isinstance(result, tuple) and len(result) == 2:
-            df_loaded, loaded_info = result
-            failed = []
-        else:
-            df_loaded = result if isinstance(result, pd.DataFrame) else pd.DataFrame()
-            loaded_info = []
-            failed = []
-    except Exception as e:
-        info_box.error(f"❌ Resource yükleme hatası: {e}")
-        df_loaded = pd.DataFrame()
-        loaded_info = []
-        failed = []
-
-    progress_bar.progress(1.0)
-    info_box.success(
-        f"✅ İndirme tamamlandı: **{len(loaded_info)}** resource yüklü, "
-        f"**{len(failed)}** başarısız · **{len(df_loaded)}** satır"
-    )
-    status_text.empty()
-
-    st.session_state[cache_key] = (df_loaded, loaded_info, failed)
-    return df_loaded, loaded_info, failed
-
-
-# =========================================================
-# SIDEBAR
-# =========================================================
-def render_sidebar():
-    st.sidebar.title("⚙️ Kontrol Paneli")
-
-    col_a, col_b = st.sidebar.columns(2)
-    with col_a:
-        if st.button("🔄 Cache", width="stretch", help="Veri cache'ini temizle"):
-            st.cache_data.clear()
-            clear_data_cache()
-            clear_filter_state()
-            st.rerun()
-    with col_b:
-        if st.button("🧹 Filtre", width="stretch", help="Filtre seçimlerini sıfırla"):
-            clear_filter_state()
-            st.rerun()
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Veri Kaynağı")
-    mode = st.sidebar.radio(
-        "Veri modu",
-        ["Stabil Demo CSV", "Türkiye Geneli CKAN Taraması"],
-        index=0,
+    search_text = st.text_input(
+        "Barınak / tesis adı ara",
+        value="",
+        key="search_text_v4",
     )
 
-    # Mode değiştiyse filtre state'ini sıfırla
-    if st.session_state.get("last_mode") != mode:
-        clear_filter_state()
-        st.session_state["last_mode"] = mode
-
-    rows_per_query = 50
-    max_resources = 15
-    if mode == "Türkiye Geneli CKAN Taraması":
-        st.sidebar.markdown("### 🇹🇷 Türkiye Geneli Tarama")
-        rows_per_query = st.sidebar.slider("Kaynak başına arama derinliği", 10, 100, 50, 10)
-        max_resources = st.sidebar.slider("Maksimum resource", 5, 30, 15, 1)
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔒 Veri Kalitesi Modu")
-    strict_mode = st.sidebar.toggle(
-        "Strict Mode (Sadece Gerçek Veri)",
-        value=True,
-        help="Sadece kapasite/mevcut hayvan alanı dolu kayıtları kullanır.",
-    )
-
-    return mode, rows_per_query, max_resources, strict_mode
-
-
-# =========================================================
-# DATA PIPELINE
-# =========================================================
-def load_pipeline(mode, rows_per_query, max_resources):
-    candidate_df = pd.DataFrame()
-    loaded_info = []
-
-    demo_raw = cached_load_local_data(LOCAL_FILE).copy()
-    demo_df = normalize_columns(demo_raw)
-    demo_df = ensure_app_columns(demo_df)
-    demo_df["source_portal"] = "Demo CSV"
-
-    if mode == "Stabil Demo CSV":
-        return demo_df, candidate_df, loaded_info, "Stabil Demo CSV", "data/kocaeli_shelters.csv"
-
-    candidate_df = search_turkiye_with_progress(rows_per_query)
-
-    if candidate_df.empty:
-        st.warning("CKAN taramasında uygun resource bulunamadı. Demo veri kullanılıyor.")
-        return demo_df, candidate_df, loaded_info, "Stabil Demo CSV (CKAN boş)", "data/kocaeli_shelters.csv"
-
-    candidate_records = candidate_df.to_dict(orient="records")
-
-    with st.expander("🇹🇷 Bulunan Resource Adayları", expanded=False):
-        st.dataframe(candidate_df, width="stretch", height=300)
-
-    df_loaded, loaded_info, failed = load_resources_with_progress(candidate_records, max_resources)
-
-    if df_loaded.empty:
-        st.warning("CKAN'dan veri yüklenemedi. Demo veri kullanılıyor.")
-        return demo_df, candidate_df, loaded_info, "Stabil Demo CSV (CKAN okunamadı)", "data/kocaeli_shelters.csv"
-
-    df_loaded = normalize_columns(df_loaded)
-    df_loaded = ensure_app_columns(df_loaded)
-    if "source_portal" not in df_loaded.columns or df_loaded["source_portal"].astype(str).eq("").all():
-        df_loaded["source_portal"] = "CKAN"
-
-    usable_ckan = int(df_loaded["coordinate_valid"].sum())
-    has_cap_ckan = int(df_loaded["capacity_available"].sum())
-    has_name_ckan = int(df_loaded["name_available"].sum())
-
-    st.info(
-        f"📊 CKAN'dan **{len(df_loaded):,}** satır yüklendi "
-        f"({usable_ckan:,} koordinatlı, {has_cap_ckan:,} kapasite, {has_name_ckan:,} isim). "
-        f"Demo verisi ({len(demo_df)} kayıt) ile birleştiriliyor."
-    )
-
-    combined = pd.concat([demo_df, df_loaded], ignore_index=True)
-    combined = ensure_app_columns(combined)
-
-    return (
-        combined,
-        candidate_df,
-        loaded_info,
-        "Hibrit (Demo + CKAN)",
-        f"Demo + {len(loaded_info)} CKAN resource",
-    )
-
-
-# =========================================================
-# RENDER BLOCKS
-# =========================================================
-def render_kpis(df: pd.DataFrame):
-    section_header("📌 Anlık Durum", "Seçili filtrelere göre güncel kapasite, risk ve veri kapsamı özeti.")
-
-    if df.empty:
-        st.warning("Filtreye uygun kayıt bulunamadı.")
-        return
-
-    cap_av = as_bool_series(df["capacity_available"])
-    occ_av = as_bool_series(df["occupancy_available"])
-    risk_ok = as_bool_series(df["risk_eligible"])
-    coord_ok = as_bool_series(df["coordinate_valid"])
-
-    known_cap = int(df.loc[cap_av, "capacity"].fillna(0).sum())
-    known_occ = int(df.loc[occ_av, "occupancy"].fillna(0).sum())
-    risk_df = df[risk_ok]
-    avg_risk = risk_df["risk_score"].mean() if len(risk_df) else None
-    critical = (df["risk_level"].astype(str) == "Kritik").sum()
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Envanter Kaydı", f"{len(df):,}")
-    c2.metric("Risk Hazır", f"{int(risk_ok.sum()):,}")
-    c3.metric("Bilinen Kapasite", f"{known_cap:,}")
-    c4.metric("Bilinen Mevcut", f"{known_occ:,}")
-    c5.metric("Ortalama Risk", f"{avg_risk:.1f}" if avg_risk is not None else "—")
-    c6.metric("Geçerli Koordinat", f"{int(coord_ok.sum()):,}")
-
-    if critical > 0:
-        st.error(f"🚨 {critical:,} kritik kayıt mevcut.")
-    else:
-        st.success("🟢 Kritik seviyede kayıt yok.")
-
-
-def render_map(df: pd.DataFrame):
-    section_header(
-        "📍 GIS Haritası",
-        "Koordinatı geçerli ve isim alanı dolu kayıtlar risk durumuna göre haritada gösterilir.",
-    )
-
-    map_df = df[
-        as_bool_series(df["coordinate_valid"])
-        & as_bool_series(df["name_available"])
-    ].copy()
-
-    if map_df.empty:
-        st.warning("Harita için geçerli koordinata sahip ve isim alanı dolu kayıt bulunamadı.")
-        with st.expander("🔍 Teşhis"):
-            st.write(f"Toplam kayıt: {len(df):,}")
-            st.write(f"Geçerli koordinatlı: {int(as_bool_series(df['coordinate_valid']).sum()):,}")
-            st.write(f"İsim alanı dolu: {int(as_bool_series(df['name_available']).sum()):,}")
-            if not df.empty:
-                cols = [c for c in ["name", "city", "district", "lat", "lon"] if c in df.columns]
-                if cols:
-                    st.dataframe(df[cols].head(10), width="stretch")
-        return
-
-    original_count = len(map_df)
-    sampled = False
-    if original_count > MAX_MAP_POINTS:
-        priority = map_df[as_bool_series(map_df["risk_eligible"])]
-        rest = map_df[~as_bool_series(map_df["risk_eligible"])]
-
-        if len(priority) >= MAX_MAP_POINTS:
-            map_df = priority.sample(n=MAX_MAP_POINTS, random_state=42)
-        else:
-            remaining = MAX_MAP_POINTS - len(priority)
-            map_df = pd.concat([
-                priority,
-                rest.sample(n=min(remaining, len(rest)), random_state=42)
-            ], ignore_index=True)
-        sampled = True
-
-    if sampled:
-        st.warning(
-            f"⚡ Performans için {original_count:,} kayıttan {len(map_df):,} tanesi haritada gösteriliyor "
-            f"(risk-uygun olanlar öncelikli)."
-        )
-
-    try:
-        shelter_map = create_shelter_map(map_df)
-        st_folium(shelter_map, width=1100, height=620, returned_objects=[])
-    except Exception as e:
-        st.warning("Harita oluşturulamadı.")
-        with st.expander("Teknik hata detayı"):
-            st.exception(e)
-
-
-def render_record_detail(df: pd.DataFrame):
-    section_header("🏥 Kayıt Detayı", "Seçilen barınak/bakımevi için operasyonel özet.")
-
-    if df.empty:
-        st.warning("Filtreye uygun kayıt bulunamadı.")
-        return
-
-    view_source = df
-    if len(df) > 500:
-        priority = df[as_bool_series(df["risk_eligible"]) | as_bool_series(df["capacity_available"])]
-        if not priority.empty:
-            view_source = priority.head(500)
-            st.caption(f"ℹ️ {len(df):,} kayıttan ilk 500 öncelikli kayıt listeleniyor.")
-        else:
-            view_source = df.head(500)
-            st.caption(f"ℹ️ {len(df):,} kayıttan ilk 500 listeleniyor.")
-
-    view = view_source.reset_index(drop=True).copy()
-    name_str = view["name"].fillna("Bilinmeyen").astype(str)
-    city_str = view["city"].fillna("—").astype(str)
-    district_str = view["district"].fillna("—").astype(str)
-    view["record_label"] = name_str + " · " + city_str + " / " + district_str + " · #" + view.index.astype(str)
-
-    selected_label = st.selectbox("Kayıt seç", view["record_label"].tolist())
-    row = view[view["record_label"] == selected_label].iloc[0]
-
-    st.markdown("#### Temel Bilgiler")
-    st.write(f"**Ad:** {row.get('name', '—')}")
-    st.write(f"**İl:** {row.get('city', '—')}")
-    st.write(f"**İlçe:** {row.get('district', '—')}")
-    st.write(f"**Veri Kapsamı:** `{row.get('data_scope', '—')}`")
-    st.write(f"**Kaynak Portal:** {row.get('source_portal', '—')}")
-
-    if pd.notna(row.get("capacity")):
-        st.markdown("#### Kapasite & Doluluk")
-        c1, c2 = st.columns(2)
-        c1.metric("Kapasite", int(row["capacity"]))
-        if pd.notna(row.get("occupancy")):
-            c2.metric("Mevcut Hayvan", int(row["occupancy"]))
-
-    if pd.notna(row.get("risk_score")):
-        st.markdown("#### Risk")
-        st.metric("Risk Skoru", f"{row['risk_score']:.1f}", row.get("risk_level", "—"))
-
-
-def render_dashboard_tabs(df, district_summary, history_df):
-    section_header("📊 Dashboard", "Risk, doluluk, ilçe özeti ve raporlar.")
-
-    tabs = st.tabs(["⚠️ Risk", "🏠 Doluluk", "🗺️ İlçe", "📈 Tarihsel", "📥 Rapor"])
-
-    with tabs[0]:
-        risk_df = df[as_bool_series(df["risk_eligible"])]
-        if risk_df.empty:
-            st.info("Risk analizine uygun kayıt yok.")
-        else:
-            try:
-                fig = chart_risk_score(risk_df)
-                st.plotly_chart(fig, width="stretch")
-            except Exception as e:
-                st.warning(f"Grafik hatası: {e}")
-
-    with tabs[1]:
-        occ_df = df[as_bool_series(df["occupancy_available"])]
-        if occ_df.empty:
-            st.info("Doluluk verisi yok.")
-        else:
-            try:
-                fig = chart_occupancy_rate(occ_df)
-                st.plotly_chart(fig, width="stretch")
-            except Exception as e:
-                st.warning(f"Grafik hatası: {e}")
-
-    with tabs[2]:
-        if district_summary is None or district_summary.empty:
-            st.info("İlçe özeti hesaplanamadı.")
-        else:
-            st.dataframe(district_summary, width="stretch")
-            try:
-                fig = chart_district_avg_risk(district_summary)
-                st.plotly_chart(fig, width="stretch")
-            except Exception:
-                pass
-
-    with tabs[3]:
-        if history_df is None or history_df.empty:
-            st.info("Tarihsel snapshot bulunamadı.")
-        else:
-            st.dataframe(history_df.tail(20), width="stretch")
-
-    with tabs[4]:
-        st.download_button(
-            "⬇️ Filtrelenmiş Veri (CSV)",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="smartshelter_filtered.csv",
-            mime="text/csv",
-        )
-        if district_summary is not None and not district_summary.empty:
-            st.download_button(
-                "⬇️ İlçe Özeti (CSV)",
-                data=district_summary.to_csv(index=False).encode("utf-8"),
-                file_name="smartshelter_district_summary.csv",
-                mime="text/csv",
-            )
-
-
-# =========================================================
-# MAIN
-# =========================================================
-def main():
-    inject_css()
-    render_hero()
-
-    mode, rows_per_query, max_resources, strict_mode = render_sidebar()
-
-    df, candidate_df, loaded_info, source_name, resource_label = load_pipeline(
-        mode, rows_per_query, max_resources
-    )
-
-    st.success(f"✅ Aktif kaynak: **{source_name}** · {resource_label}")
-
-    try:
-        df = calculate_risk(df)
-        df = create_action_recommendations(df)
-    except Exception as e:
-        st.warning(f"Risk hesaplama atlandı: {e}")
-
-    df = ensure_app_columns(df)
-
-    # ---- AKILLI STRICT MODE ----
-    if strict_mode and not df.empty:
-        before = len(df)
-        valid_scopes = ["risk_ready", "capacity_only", "location_only"]
-
-        candidate = df[df["data_scope"].astype(str).isin(valid_scopes)].copy()
-        with_name = candidate[as_bool_series(candidate["name_available"])]
-
-        if not with_name.empty:
-            df = with_name
-            removed = before - len(df)
-            if removed > 0:
-                st.sidebar.success(f"🔒 Strict: {removed:,} kayıt çıkarıldı.")
-                st.sidebar.caption(
-                    f"📊 Kalan: {len(df):,} kayıt · "
-                    f"{int(as_bool_series(df['coordinate_valid']).sum()):,} koordinatlı"
-                )
-        elif not candidate.empty:
-            df = candidate
-            st.sidebar.warning(
-                f"⚠️ Strict: name filtresi atlandı. "
-                f"{len(df):,} scope-uygun kayıt gösteriliyor."
-            )
-        else:
-            relaxed = df[as_bool_series(df["coordinate_valid"]) | as_bool_series(df["name_available"])]
-            df = relaxed if not relaxed.empty else df
-            st.sidebar.warning("⚠️ Strict Mode tüm filtreleri yedi. Gevşek mod aktif.")
-
-    # ---- Sidebar filtreleri ----
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔎 Filtreler")
-
-    cities = sorted(df["city"].dropna().astype(str).unique().tolist()) if not df.empty else []
-    districts = sorted(df["district"].dropna().astype(str).unique().tolist()) if not df.empty else []
-    risk_levels = sorted(df["risk_level"].dropna().astype(str).unique().tolist()) if not df.empty else []
-
-    # Mode + veri uzunluğunu key'e dahil et
-    filter_key = f"{mode}_{len(df)}"
-
-    use_city = st.sidebar.checkbox(
+    city_filter_enabled = st.checkbox(
         "İl filtresi kullan",
         value=False,
-        key=f"flt_use_city_{filter_key}",
+        key="city_filter_enabled_v4",
     )
-    if use_city:
-        selected_cities = st.sidebar.multiselect(
-            "İl seç", cities, default=cities,
-            key=f"flt_city_{filter_key}",
-        )
-    else:
-        selected_cities = cities
 
-    use_district = st.sidebar.checkbox(
+    selected_cities: list[str] = []
+
+    if city_filter_enabled and "city" in raw_df.columns:
+        city_options = (
+            raw_df["city"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .sort_values()
+            .unique()
+            .tolist()
+        )
+
+        selected_cities = st.multiselect(
+            "İl seç",
+            options=city_options,
+            default=[],
+            key="city_filter_v4",
+        )
+
+    district_filter_enabled = st.checkbox(
         "İlçe filtresi kullan",
         value=False,
-        key=f"flt_use_district_{filter_key}",
-    )
-    if use_district:
-        selected_districts = st.sidebar.multiselect(
-            "İlçe seç", districts, default=districts,
-            key=f"flt_district_{filter_key}",
-        )
-    else:
-        selected_districts = districts
-
-    # ---- BASIT RİSK FİLTRESİ — DEFAULT TÜMÜ SEÇİLİ ----
-    selected_risks = st.sidebar.multiselect(
-        "Risk seviyesi (varsayılan: tümü)",
-        risk_levels,
-        default=risk_levels,  # ⭐ Her zaman tüm seviyeler default
-        key=f"flt_risk_{filter_key}",
-        help="Boş bırakırsan tüm seviyeler gösterilir.",
+        key="district_filter_enabled_v4",
     )
 
-    if not selected_risks and risk_levels:
-        st.sidebar.info("ℹ️ Risk filtresi boş — tüm seviyeler gösteriliyor.")
-        selected_risks = risk_levels
+    selected_districts: list[str] = []
 
-    # ---- Filtre uygula ----
-    if df.empty:
-        filtered = df.copy()
-    else:
-        filtered = df[
-            df["city"].astype(str).isin(selected_cities)
-            & df["district"].astype(str).isin(selected_districts)
-            & df["risk_level"].astype(str).isin(selected_risks)
-        ].copy()
+    district_base_df = raw_df.copy()
 
-    # ---- FİLTRE TEŞHİS BANNER'I ----
-    if len(filtered) < len(df):
-        elenen = len(df) - len(filtered)
-        st.warning(
-            f"⚠️ **{elenen:,} kayıt filtrelendi** ({len(df):,} → {len(filtered):,}). "
-            f"Tümünü görmek için yan paneldeki 🧹 **Filtre** butonuna basın."
+    if selected_cities and "city" in district_base_df.columns:
+        district_base_df = district_base_df[
+            district_base_df["city"].astype(str).isin(selected_cities)
+        ]
+
+    if district_filter_enabled and "district" in district_base_df.columns:
+        district_options = (
+            district_base_df["district"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .sort_values()
+            .unique()
+            .tolist()
         )
 
-    with st.expander(
-        f"🔬 Filtre Teşhisi (Toplam: {len(df):,} → Görünen: {len(filtered):,})",
-        expanded=False,
-    ):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("**Strict Mode Sonrası:**")
-            st.write(f"- Toplam: **{len(df):,}**")
-            st.write(f"- Şehir: {len(cities)}")
-            st.write(f"- İlçe: {len(districts)}")
-            st.write(f"- Koordinatlı: {int(as_bool_series(df['coordinate_valid']).sum()):,}")
-        with col2:
-            st.markdown("**Aktif Filtreler:**")
-            st.write(f"- İl: {'✓' if use_city else '✗ kapalı'}")
-            st.write(f"- İlçe: {'✓' if use_district else '✗ kapalı'}")
-            st.write(f"- Risk: **{len(selected_risks)}/{len(risk_levels)}** seçili")
-        with col3:
-            st.markdown("**Risk Seviyeleri:**")
-            if not df.empty:
-                risk_counts = df["risk_level"].astype(str).value_counts()
-                for level, count in risk_counts.items():
-                    check = "✓" if level in selected_risks else "✗"
-                    st.write(f"- {check} {level}: **{count:,}**")
+        selected_districts = st.multiselect(
+            "İlçe seç",
+            options=district_options,
+            default=[],
+            key="district_filter_v4",
+        )
 
-    # ---- Render ----
-    render_kpis(filtered)
-    st.divider()
+    st.caption("Risk seviyesi varsayılan: tümü")
 
-    left, right = st.columns([2.25, 1], gap="large")
-    with left:
-        render_map(filtered)
-    with right:
-        render_record_detail(filtered)
+    selected_risks: list[str] = []
 
-    st.divider()
+    if "risk_level" in raw_df.columns:
+        risk_options = (
+            raw_df["risk_level"]
+            .fillna("Veri yetersiz")
+            .astype(str)
+            .str.strip()
+            .replace("", "Veri yetersiz")
+            .unique()
+            .tolist()
+        )
 
-    try:
-        district_summary = build_district_summary(filtered)
-    except Exception:
-        district_summary = pd.DataFrame()
+        risk_options = _risk_order(risk_options)
 
-    history_df = pd.read_csv(HISTORY_FILE) if HISTORY_FILE.exists() else pd.DataFrame()
+        selected_risks = st.multiselect(
+            "Risk seviyesi",
+            options=risk_options,
+            default=risk_options,
+            key="risk_filter_v4",
+        )
 
-    render_dashboard_tabs(filtered, district_summary, history_df)
-
-    with st.expander("🧾 Ham Veri", expanded=False):
-        if len(filtered) > 1000:
-            st.caption(f"ℹ️ {len(filtered):,} kayıttan ilk 1000 gösteriliyor.")
-            st.dataframe(filtered.head(1000), width="stretch")
-        else:
-            st.dataframe(filtered, width="stretch")
+    else:
+        st.info("risk_level kolonu bulunamadı.")
 
 
-if __name__ == "__main__":
-    main()
+filtered_df = _apply_dashboard_filters(
+    df=raw_df,
+    selected_cities=selected_cities,
+    selected_districts=selected_districts,
+    selected_risks=selected_risks,
+    search_text=search_text,
+)
+
+
+# =============================================================================
+# Dashboard ana alanı
+# =============================================================================
+
+_render_filter_diagnostics(
+    raw_df=raw_df,
+    filtered_df=filtered_df,
+    selected_cities=selected_cities,
+    selected_districts=selected_districts,
+    selected_risks=selected_risks,
+)
+
+st.markdown('<div class="section-title">📌 Anlık Durum</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-subtitle">Seçili filtrelere göre kapasite, risk ve veri kapsamı özeti.</div>',
+    unsafe_allow_html=True,
+)
+
+_render_metric_cards(filtered_df)
+
+st.divider()
+
+tab_map, tab_summary, tab_data, tab_debug = st.tabs(
+    [
+        "🗺️ Harita",
+        "📊 Özet",
+        "📋 Veri Tablosu",
+        "🛠️ Debug",
+    ]
+)
+
+with tab_map:
+    st.markdown("### 🗺️ Barınak Haritası")
+    st.caption(
+        "Sağ üstteki layer menüsünden Stadia, OpenStreetMap, CartoDB ve Esri temalarını seçebilirsin."
+    )
+    _render_map(filtered_df)
+
+with tab_summary:
+    st.markdown("### 📊 Veri Özeti")
+    _render_risk_summary(filtered_df)
+
+with tab_data:
+    st.markdown("### 📋 Filtrelenmiş Veri")
+    _render_table(filtered_df)
+
+with tab_debug:
+    st.markdown("### 🛠️ Debug Bilgileri")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.write("**Uygulama durumu**")
+        st.json(
+            {
+                "data_mode": data_mode,
+                "strict_mode": strict_mode,
+                "source_label": source_label,
+                "is_demo": is_demo,
+                "raw_shape": list(raw_df.shape),
+                "filtered_shape": list(filtered_df.shape),
+                "valid_coordinates_raw": _valid_coordinate_count(raw_df),
+                "valid_coordinates_filtered": _valid_coordinate_count(filtered_df),
+            }
+        )
+
+    with c2:
+        st.write("**Data loader debug**")
+        st.write(debug)
+
+    if errors:
+        st.write("**Errors**")
+        st.write(errors)
+
+    st.write("**Kolonlar**")
+    st.write(list(raw_df.columns))
+
+    st.write("**İlk 20 kayıt**")
+    st.dataframe(raw_df.head(20), use_container_width=True)
