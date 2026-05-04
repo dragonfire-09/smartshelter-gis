@@ -410,7 +410,14 @@ def render_sidebar():
         st.cache_data.clear()
         keys_to_remove = [
             k for k in st.session_state.keys()
-            if k.startswith("ckan_search_cache_") or k.startswith("resources_loaded_")
+            if k.startswith("ckan_search_cache_")
+            or k.startswith("resources_loaded_")
+            or k.startswith("filter_")
+            or k.startswith("risk_filter_")
+            or k.startswith("city_filter_")
+            or k.startswith("district_filter_")
+            or k.startswith("use_city_")
+            or k.startswith("use_district_")
         ]
         for k in keys_to_remove:
             del st.session_state[k]
@@ -750,28 +757,50 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔎 Filtreler")
 
+    # 🌍 Tüm Türkiye Görünümü kısayolu — tüm filtreleri sıfırlar
     if st.sidebar.button(
         "🌍 Tüm Türkiye Görünümü",
         width="stretch",
-        help="Tüm risk seviyelerini varsayılan seçili yapar.",
+        help="Tüm filtreleri sıfırlar, tüm kayıtları gösterir.",
     ):
-        for key in list(st.session_state.keys()):
-            if key.startswith("filter_"):
-                del st.session_state[key]
+        keys_to_remove = [
+            k for k in st.session_state.keys()
+            if k.startswith("filter_")
+            or k.startswith("risk_filter_")
+            or k.startswith("city_filter_")
+            or k.startswith("district_filter_")
+            or k.startswith("use_city_")
+            or k.startswith("use_district_")
+        ]
+        for k in keys_to_remove:
+            del st.session_state[k]
         st.rerun()
 
     cities = sorted(df["city"].dropna().astype(str).unique().tolist()) if not df.empty else []
     districts = sorted(df["district"].dropna().astype(str).unique().tolist()) if not df.empty else []
     risk_levels = sorted(df["risk_level"].dropna().astype(str).unique().tolist()) if not df.empty else []
 
-    use_city = st.sidebar.checkbox("İl filtresi kullan", value=False)
+    # Mode-bağımlı key — mode değişince filtreler resetlenir
+    filter_key = f"{mode}_{len(df)}"
+
+    use_city = st.sidebar.checkbox(
+        "İl filtresi kullan", value=False, key=f"use_city_{filter_key}"
+    )
     selected_cities = (
-        st.sidebar.multiselect("İl seç", cities, default=cities) if use_city else cities
+        st.sidebar.multiselect(
+            "İl seç", cities, default=cities,
+            key=f"city_filter_{filter_key}",
+        ) if use_city else cities
     )
 
-    use_district = st.sidebar.checkbox("İlçe filtresi kullan", value=False)
+    use_district = st.sidebar.checkbox(
+        "İlçe filtresi kullan", value=False, key=f"use_district_{filter_key}"
+    )
     selected_districts = (
-        st.sidebar.multiselect("İlçe seç", districts, default=districts) if use_district else districts
+        st.sidebar.multiselect(
+            "İlçe seç", districts, default=districts,
+            key=f"district_filter_{filter_key}",
+        ) if use_district else districts
     )
 
     # ---- AKILLI RİSK FİLTRESİ ----
@@ -795,12 +824,14 @@ def main():
 
     selected_risks = st.sidebar.multiselect(
         "Risk seviyesi", risk_levels, default=default_risks,
+        key=f"risk_filter_{filter_key}",
     )
 
     if not selected_risks and risk_levels:
         st.sidebar.info("ℹ️ Risk filtresi boş — tüm seviyeler gösteriliyor.")
         selected_risks = risk_levels
 
+    # ---- Filtre uygula ----
     if df.empty:
         filtered = df.copy()
     else:
@@ -810,6 +841,42 @@ def main():
             & df["risk_level"].astype(str).isin(selected_risks)
         ].copy()
 
+    # ---- FİLTRE TEŞHİS PANELİ ----
+    with st.expander(
+        f"🔬 Filtre Teşhisi (Toplam: {len(df):,} → Filtrelenmiş: {len(filtered):,})",
+        expanded=False,
+    ):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown("**Strict Mode Sonrası:**")
+            st.write(f"- Toplam kayıt: **{len(df):,}**")
+            st.write(f"- Şehir sayısı: {len(cities)}")
+            st.write(f"- İlçe sayısı: {len(districts)}")
+            st.write(f"- Koordinatlı: {int(as_bool_series(df['coordinate_valid']).sum()):,}")
+        with col2:
+            st.markdown("**Aktif Filtreler:**")
+            st.write(f"- İl: {'✓ aktif' if use_city else '✗ kapalı (hepsi seçili)'}")
+            st.write(f"- İlçe: {'✓ aktif' if use_district else '✗ kapalı (hepsi seçili)'}")
+            st.write(f"- Risk: **{len(selected_risks)}/{len(risk_levels)}** seçili")
+            if len(selected_risks) < len(risk_levels):
+                missing = set(risk_levels) - set(selected_risks)
+                st.caption(f"❗ Filtrelenen: {', '.join(missing)}")
+        with col3:
+            st.markdown("**Risk Seviyeleri (df):**")
+            if not df.empty:
+                risk_counts = df["risk_level"].astype(str).value_counts()
+                for level, count in risk_counts.items():
+                    check = "✓" if level in selected_risks else "✗"
+                    st.write(f"- {check} {level}: **{count:,}**")
+
+        if len(filtered) < len(df):
+            elenen = len(df) - len(filtered)
+            st.error(
+                f"⚠️ **{elenen:,} kayıt filtrelendi.** "
+                f"Tümünü görmek için yan paneldeki 🌍 **Tüm Türkiye Görünümü** butonuna basın."
+            )
+
+    # ---- Render ----
     render_kpis(filtered)
     st.divider()
 
