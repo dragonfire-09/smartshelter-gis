@@ -1,191 +1,245 @@
 import folium
-from folium.plugins import Fullscreen, HeatMap, MarkerCluster, MeasureControl, MiniMap
+from folium.plugins import HeatMap, MarkerCluster
+import pandas as pd
 
 
-def risk_color(risk_level):
-    risk_level = str(risk_level)
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+def _get_lat_col(df: pd.DataFrame) -> str:
+    for cand in ["latitude", "lat", "enlem", "y"]:
+        if cand in df.columns:
+            return cand
+    return None
 
-    if risk_level == "Kritik":
+
+def _get_lon_col(df: pd.DataFrame) -> str:
+    for cand in ["longitude", "lon", "lng", "boylam", "x"]:
+        if cand in df.columns:
+            return cand
+    return None
+
+
+def _risk_color(level: str) -> str:
+    level = str(level).strip()
+
+    if level == "Kritik":
         return "red"
-
-    if risk_level == "Orta":
+    if level == "Orta":
         return "orange"
+    if level == "Düşük":
+        return "green"
+    return "gray"
 
-    return "green"
+
+def _risk_hex(level: str) -> str:
+    level = str(level).strip()
+
+    if level == "Kritik":
+        return "#ef4444"
+    if level == "Orta":
+        return "#f59e0b"
+    if level == "Düşük":
+        return "#10b981"
+    return "#94a3b8"
 
 
-def create_popup_html(row):
-    quality_note = row.get("data_quality_note", "")
+def _safe_int(val, default=0):
+    try:
+        if pd.isna(val):
+            return default
+        return int(val)
+    except Exception:
+        return default
 
-    if not quality_note:
-        quality_note = "Veri kalite notu yok."
 
-    html = f"""
-    <div style="font-family: Arial; width: 300px;">
-        <h4 style="margin-bottom: 8px;">{row["name"]}</h4>
+def _safe_float(val, default=0.0):
+    try:
+        if pd.isna(val):
+            return default
+        return float(val)
+    except Exception:
+        return default
 
-        <b>İl:</b> {row["city"]}<br>
-        <b>İlçe:</b> {row["district"]}<br>
-        <b>Kapasite:</b> {int(row["capacity"])}<br>
-        <b>Mevcut:</b> {int(row["occupancy"])}<br>
-        <b>Doluluk:</b> %{row["occupancy_rate"]}<br>
-        <b>Veteriner:</b> {int(row["vet_count"])}<br>
-        <b>Veteriner Başına Hayvan:</b> {row["animals_per_vet"]}<br>
-        <b>Kısırlaştırma:</b> {int(row["sterilization_count"])}<br>
-        <b>Sahiplendirme:</b> {int(row["adoption_count"])}<br>
 
-        <hr style="margin: 8px 0;">
-
-        <b>Risk:</b> {row["risk_score"]} - {row["risk_level"]}<br>
-        <b>Öneri:</b> {row.get("recommended_action", "-")}<br>
-
-        <hr style="margin: 8px 0;">
-
-        <small><b>Veri Kalitesi:</b> {quality_note}</small>
-    </div>
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
+def create_shelter_map(df: pd.DataFrame) -> folium.Map:
     """
-
-    return html
-
-
-def add_legend(m):
-    legend_html = """
-    <div style="
-        position: fixed;
-        bottom: 35px;
-        left: 35px;
-        z-index: 9999;
-        background-color: white;
-        padding: 12px 14px;
-        border: 1px solid #d1d5db;
-        border-radius: 10px;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.2);
-        font-size: 13px;
-    ">
-        <b>Risk Seviyesi</b><br>
-        <span style="color: green;">●</span> Düşük<br>
-        <span style="color: orange;">●</span> Orta<br>
-        <span style="color: red;">●</span> Kritik<br>
-        <hr style="margin: 6px 0;">
-        <small>Marker boyutu doluluk oranına göre değişir.</small>
-    </div>
+    Folium tabanlı GIS haritası oluşturur.
+    'latitude'/'longitude' veya geriye dönük uyumluluk için 'lat'/'lon' kolonlarını destekler.
     """
+    lat_col = _get_lat_col(df)
+    lon_col = _get_lon_col(df)
 
-    m.get_root().html.add_child(folium.Element(legend_html))
+    if lat_col is None or lon_col is None or df.empty:
+        # Boş varsayılan harita - Türkiye merkezi
+        return folium.Map(
+            location=[39.0, 35.0],
+            zoom_start=6,
+            tiles="CartoDB positron",
+        )
 
+    work_df = df.copy()
+    work_df[lat_col] = pd.to_numeric(work_df[lat_col], errors="coerce")
+    work_df[lon_col] = pd.to_numeric(work_df[lon_col], errors="coerce")
 
-def create_shelter_map(df):
-    center_lat = df["lat"].mean()
-    center_lon = df["lon"].mean()
+    work_df = work_df.dropna(subset=[lat_col, lon_col])
 
-    m = folium.Map(
+    if work_df.empty:
+        return folium.Map(
+            location=[39.0, 35.0],
+            zoom_start=6,
+            tiles="CartoDB positron",
+        )
+
+    center_lat = work_df[lat_col].mean()
+    center_lon = work_df[lon_col].mean()
+
+    fmap = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=10,
         tiles=None,
-        control_scale=True,
     )
 
-    folium.TileLayer(
-        "OpenStreetMap",
-        name="OpenStreetMap",
-        control=True,
-    ).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(fmap)
+    folium.TileLayer("CartoDB positron", name="Açık Tema").add_to(fmap)
+    folium.TileLayer("CartoDB dark_matter", name="Koyu Tema").add_to(fmap)
 
-    folium.TileLayer(
-        "CartoDB positron",
-        name="Açık Tema",
-        control=True,
-    ).add_to(m)
+    shelter_layer = folium.FeatureGroup(name="Barınak / Bakımevi Noktaları", show=True)
+    critical_layer = folium.FeatureGroup(name="Kritik Riskli Kayıtlar", show=True)
+    heatmap_layer = folium.FeatureGroup(name="Risk Yoğunluk Haritası", show=True)
 
-    folium.TileLayer(
-        "CartoDB dark_matter",
-        name="Koyu Tema",
-        control=True,
-    ).add_to(m)
+    cluster = MarkerCluster().add_to(shelter_layer)
 
-    Fullscreen(
-        position="topleft",
-        title="Tam ekran",
-        title_cancel="Tam ekrandan çık",
-    ).add_to(m)
+    heat_points = []
 
-    MiniMap(
-        toggle_display=True,
-        minimized=True,
-        position="bottomright",
-    ).add_to(m)
+    for _, row in work_df.iterrows():
+        lat = _safe_float(row[lat_col])
+        lon = _safe_float(row[lon_col])
 
-    MeasureControl(
-        position="bottomleft",
-        primary_length_unit="kilometers",
-        secondary_length_unit="meters",
-    ).add_to(m)
+        name = str(row.get("name", "Bilinmeyen"))
+        city = str(row.get("city", "")) if pd.notna(row.get("city")) else ""
+        district = str(row.get("district", "")) if pd.notna(row.get("district")) else ""
 
-    marker_cluster = MarkerCluster(
-        name="Barınak / Bakımevi Noktaları"
-    ).add_to(m)
+        risk_level = str(row.get("risk_level", "Veri yetersiz"))
+        risk_score = row.get("risk_score", None)
 
-    critical_group = folium.FeatureGroup(
-        name="Kritik Riskli Kayıtlar",
-        show=True,
-    ).add_to(m)
+        capacity = _safe_int(row.get("capacity"))
+        occupancy = _safe_int(row.get("occupancy"))
 
-    for _, row in df.iterrows():
-        color = risk_color(row["risk_level"])
+        capacity_available = bool(row.get("capacity_available", False))
+        occupancy_available = bool(row.get("occupancy_available", False))
 
-        radius = 7 + min(float(row["occupancy_rate"]) / 10, 14)
+        occupancy_rate = row.get("occupancy_rate", None)
+        animals_per_vet = row.get("animals_per_vet", None)
 
-        popup_html = create_popup_html(row)
+        source_portal = str(row.get("source_portal", "")) if pd.notna(row.get("source_portal")) else ""
 
-        marker = folium.CircleMarker(
-            location=[row["lat"], row["lon"]],
+        # Popup içeriği
+        popup_lines = [
+            f"<b>{name}</b>",
+            f"İl/İlçe: {city} / {district}".strip(" /"),
+        ]
+
+        if source_portal:
+            popup_lines.append(f"Kaynak: {source_portal}")
+
+        popup_lines.append(f"Risk: <b style='color:{_risk_hex(risk_level)}'>{risk_level}</b>")
+
+        if pd.notna(risk_score):
+            popup_lines.append(f"Risk Skoru: {risk_score}")
+
+        if capacity_available:
+            popup_lines.append(f"Kapasite: {capacity}")
+
+        if occupancy_available:
+            popup_lines.append(f"Mevcut: {occupancy}")
+
+        if pd.notna(occupancy_rate):
+            popup_lines.append(f"Doluluk: %{occupancy_rate}")
+
+        if pd.notna(animals_per_vet):
+            popup_lines.append(f"Veteriner başına: {animals_per_vet}")
+
+        popup_html = "<br>".join(popup_lines)
+
+        # Doluluk oranına göre marker boyutu
+        if pd.notna(occupancy_rate):
+            radius = max(5, min(18, 5 + float(occupancy_rate) / 8))
+        else:
+            radius = 6
+
+        color = _risk_color(risk_level)
+        hex_color = _risk_hex(risk_level)
+
+        folium.CircleMarker(
+            location=[lat, lon],
             radius=radius,
-            color=color,
+            color=hex_color,
             fill=True,
-            fill_color=color,
+            fill_color=hex_color,
             fill_opacity=0.75,
-            weight=2,
-            popup=folium.Popup(popup_html, max_width=360),
-            tooltip=f"{row['name']} | Risk: {row['risk_level']} | Skor: {row['risk_score']}",
-        )
+            weight=1.5,
+            popup=folium.Popup(popup_html, max_width=320),
+            tooltip=f"{name} - {risk_level}",
+        ).add_to(cluster)
 
-        marker.add_to(marker_cluster)
+        if risk_level == "Kritik":
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.Icon(color="red", icon="exclamation-sign"),
+                popup=folium.Popup(popup_html, max_width=320),
+                tooltip=f"KRİTİK: {name}",
+            ).add_to(critical_layer)
 
-        if str(row["risk_level"]) == "Kritik":
-            folium.CircleMarker(
-                location=[row["lat"], row["lon"]],
-                radius=radius + 3,
-                color="red",
-                fill=True,
-                fill_color="red",
-                fill_opacity=0.35,
-                weight=3,
-                popup=folium.Popup(popup_html, max_width=360),
-                tooltip=f"KRİTİK: {row['name']}",
-            ).add_to(critical_group)
+        # Heatmap için risk skoru ağırlığı
+        weight = _safe_float(risk_score, 0)
+        if weight > 0:
+            heat_points.append([lat, lon, weight / 100.0])
 
-    heat_data = (
-        df[["lat", "lon", "risk_score"]]
-        .dropna()
-        .values
-        .tolist()
-    )
-
-    if len(heat_data) > 0:
+    if heat_points:
         HeatMap(
-            heat_data,
-            name="Risk Yoğunluk Haritası",
-            min_opacity=0.25,
-            radius=28,
-            blur=20,
-            max_zoom=13,
-        ).add_to(m)
+            heat_points,
+            radius=22,
+            blur=18,
+            min_opacity=0.35,
+            max_zoom=12,
+        ).add_to(heatmap_layer)
 
-    add_legend(m)
+    shelter_layer.add_to(fmap)
+    critical_layer.add_to(fmap)
+    heatmap_layer.add_to(fmap)
 
-    folium.LayerControl(
-        collapsed=False,
-        position="topright",
-    ).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(fmap)
 
-    return m
+    # Lejant
+    legend_html = """
+    <div style="
+        position: fixed;
+        bottom: 30px;
+        left: 30px;
+        z-index: 9999;
+        background: rgba(255,255,255,0.95);
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 13px;
+        box-shadow: 0 6px 20px rgba(15,23,42,0.12);
+    ">
+        <div style="font-weight:700; margin-bottom:6px;">Risk Seviyesi</div>
+        <div style="margin:2px 0;"><span style="color:#10b981;">●</span> Düşük</div>
+        <div style="margin:2px 0;"><span style="color:#f59e0b;">●</span> Orta</div>
+        <div style="margin:2px 0;"><span style="color:#ef4444;">●</span> Kritik</div>
+        <div style="margin:2px 0;"><span style="color:#94a3b8;">●</span> Veri yetersiz</div>
+        <div style="margin-top:6px; color:#64748b; font-size:11px;">
+            Marker boyutu doluluk oranına göre değişir.
+        </div>
+    </div>
+    """
+
+    fmap.get_root().html.add_child(folium.Element(legend_html))
+
+    return fmap
