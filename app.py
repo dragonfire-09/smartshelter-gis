@@ -3,10 +3,8 @@ SmartShelter GIS - Ana Uygulama
 ================================
 Hayvan bakımevi izleme, risk önceliklendirme ve GIS karar destek paneli.
 """
-import time
 from io import BytesIO
 from pathlib import Path
-from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -37,7 +35,6 @@ from src.data_loader import (
     load_resource,
     search_ckan_resources,
     search_turkiye_ckan_resources,
-    search_turkiye_ckan_resources_with_progress,
 )
 from src.history import (
     append_snapshot,
@@ -158,7 +155,7 @@ def as_bool_series(series):
 
 
 def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Eksik sütunları güvenli default'larla doldur."""
+    """Eksik sütunları güvenli default'larla doldur ve flag'leri compute et."""
     df = df.copy()
 
     string_defaults = {
@@ -201,7 +198,11 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[flag] = as_bool_series(df[flag])
 
     # Otomatik flag'leri compute et
-    df["name_available"] = df["name"].astype(str).str.strip().replace({"nan": "", "None": "", "<NA>": ""}).ne("")
+    df["name_available"] = (
+        df["name"].astype(str).str.strip()
+        .replace({"nan": "", "None": "", "<NA>": ""})
+        .ne("")
+    )
     df["coordinate_valid"] = (
         df["lat"].between(-90, 90, inclusive="both")
         & df["lon"].between(-180, 180, inclusive="both")
@@ -230,7 +231,7 @@ def ensure_app_columns(df: pd.DataFrame) -> pd.DataFrame:
 def render_sidebar():
     st.sidebar.title("⚙️ Kontrol Paneli")
 
-    if st.sidebar.button("🔄 Cache Temizle", use_container_width=True):
+    if st.sidebar.button("🔄 Cache Temizle", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
@@ -261,93 +262,92 @@ def render_sidebar():
 
 
 # =========================================================
-# DATA PIPELINE
+# DATA PIPELINE (Hibrit Mod)
 # =========================================================
 def load_pipeline(mode, rows_per_query, max_resources):
-    """Veri yükleme + normalize + risk hesaplama."""
+    """Veri yükleme: Demo CSV her zaman temel, CKAN üstüne ekleniyor."""
     candidate_df = pd.DataFrame()
     loaded_info = []
-    source_name = "Stabil Demo CSV"
-    resource_label = "data/kocaeli_shelters.csv"
 
     # Demo CSV her zaman temel olarak yüklenir
     demo_raw = cached_load_local_data(LOCAL_FILE).copy()
     demo_df = normalize_columns(demo_raw)
     demo_df = ensure_app_columns(demo_df)
-    demo_df["source_portal"] = "Demo CSV"
+    if "source_portal" not in demo_df.columns or demo_df["source_portal"].astype(str).eq("").all():
+        demo_df["source_portal"] = "Demo CSV"
 
     if mode == "Stabil Demo CSV":
-        return demo_df, candidate_df, loaded_info, source_name, resource_label
+        return demo_df, candidate_df, loaded_info, "Stabil Demo CSV", "data/kocaeli_shelters.csv"
 
-    # CKAN modu
-    if mode == "Türkiye Geneli CKAN Taraması":
-        with st.spinner("🇹🇷 Türkiye geneli CKAN taranıyor..."):
-            try:
-                raw_candidates = cached_search_turkiye_ckan_resources(rows_per_query)
-            except Exception as e:
-                st.error(f"CKAN tarama hatası: {e}")
-                raw_candidates = []
+    # ---- CKAN modu ----
+    with st.spinner("🇹🇷 Türkiye geneli CKAN taranıyor..."):
+        try:
+            raw_candidates = cached_search_turkiye_ckan_resources(rows_per_query)
+        except Exception as e:
+            st.error(f"CKAN tarama hatası: {e}")
+            raw_candidates = []
 
-        if isinstance(raw_candidates, pd.DataFrame):
-            candidate_df = raw_candidates.copy()
-            candidate_records = candidate_df.to_dict(orient="records")
-        elif isinstance(raw_candidates, list):
-            candidate_records = raw_candidates
-            candidate_df = pd.DataFrame(raw_candidates) if raw_candidates else pd.DataFrame()
-        else:
-            candidate_df = pd.DataFrame()
-            candidate_records = []
+    if isinstance(raw_candidates, pd.DataFrame):
+        candidate_df = raw_candidates.copy()
+        candidate_records = candidate_df.to_dict(orient="records")
+    elif isinstance(raw_candidates, list):
+        candidate_records = raw_candidates
+        candidate_df = pd.DataFrame(raw_candidates) if raw_candidates else pd.DataFrame()
+    else:
+        candidate_df = pd.DataFrame()
+        candidate_records = []
 
-        if len(candidate_df) > 0:
-            st.success(f"Türkiye geneli taramada {len(candidate_df)} uygun resource adayı bulundu.")
-            with st.expander("🇹🇷 Bulunan Resource Adayları", expanded=False):
-                st.dataframe(candidate_df, width="stretch", height=300)
+    if len(candidate_df) == 0:
+        st.warning("CKAN taramasında uygun resource bulunamadı. Demo veri kullanılıyor.")
+        return demo_df, candidate_df, loaded_info, "Stabil Demo CSV (CKAN boş)", "data/kocaeli_shelters.csv"
 
-            resources_tuple = tuple(to_resource_tuple(r) for r in candidate_records)
+    st.success(f"Türkiye geneli taramada {len(candidate_df)} uygun resource adayı bulundu.")
+    with st.expander("🇹🇷 Bulunan Resource Adayları", expanded=False):
+        st.dataframe(candidate_df, width="stretch", height=300)
 
-            with st.spinner(f"Resource'lar yükleniyor (maks {max_resources})..."):
-                try:
-                    result = cached_load_multiple_resources(resources_tuple, max_resources)
-                    if isinstance(result, tuple) and len(result) >= 2:
-                        df_loaded = result[0]
-                        loaded_info = result[1]
-                    elif isinstance(result, pd.DataFrame):
-                        df_loaded = result
-                        loaded_info = []
-                    else:
-                        df_loaded = pd.DataFrame()
-                        loaded_info = []
-                except Exception as e:
-                    st.error(f"Resource yükleme hatası: {e}")
-                    df_loaded = pd.DataFrame()
-                    loaded_info = []
+    resources_tuple = tuple(to_resource_tuple(r) for r in candidate_records)
 
-            if not df_loaded.empty:
-                df_loaded = normalize_columns(df_loaded)
-                df_loaded = ensure_app_columns(df_loaded)
+    with st.spinner(f"Resource'lar yükleniyor (maks {max_resources})..."):
+        try:
+            result = cached_load_multiple_resources(resources_tuple, max_resources)
+            if isinstance(result, tuple) and len(result) >= 2:
+                df_loaded = result[0]
+                loaded_info = result[1]
+            elif isinstance(result, pd.DataFrame):
+                df_loaded = result
+                loaded_info = []
+            else:
+                df_loaded = pd.DataFrame()
+                loaded_info = []
+        except Exception as e:
+            st.error(f"Resource yükleme hatası: {e}")
+            df_loaded = pd.DataFrame()
+            loaded_info = []
 
-                usable = int(df_loaded["coordinate_valid"].sum())
-                has_cap = int(df_loaded["capacity_available"].sum())
+    if df_loaded.empty:
+        st.warning("CKAN'dan veri yüklenemedi. Demo veri kullanılıyor.")
+        return demo_df, candidate_df, loaded_info, "Stabil Demo CSV (CKAN okunamadı)", "data/kocaeli_shelters.csv"
 
-                if usable >= 3 or has_cap >= 3:
-                    # CKAN verisi yeterli — sadece onu kullan
-                    return df_loaded, candidate_df, loaded_info, "Türkiye Geneli CKAN", f"{len(loaded_info) if loaded_info else len(df_loaded)} resource"
-                else:
-                    # CKAN verisi yetersiz — demo + CKAN birleştir
-                    st.info(
-                        f"ℹ️ CKAN'dan {len(df_loaded)} satır geldi ama operasyonel veri zayıf "
-                        f"(sadece {usable} koordinat, {has_cap} kapasite). "
-                        f"Demo veri ile birleştirildi."
-                    )
-                    df_loaded["source_portal"] = df_loaded.get("source_portal", "CKAN")
-                    combined = pd.concat([demo_df, df_loaded], ignore_index=True)
-                    combined = ensure_app_columns(combined)
-                    return combined, candidate_df, loaded_info, "Hibrit (Demo + CKAN)", f"Demo + {len(loaded_info) if loaded_info else len(df_loaded)} CKAN resource"
-        else:
-            st.warning("CKAN taramasında uygun resource bulunamadı.")
+    df_loaded = normalize_columns(df_loaded)
+    df_loaded = ensure_app_columns(df_loaded)
 
-    # Final fallback
-    return demo_df, candidate_df, loaded_info, source_name, resource_label
+    usable = int(df_loaded["coordinate_valid"].sum())
+    has_cap = int(df_loaded["capacity_available"].sum())
+
+    if usable >= 3 or has_cap >= 3:
+        return df_loaded, candidate_df, loaded_info, "Türkiye Geneli CKAN", f"{len(loaded_info) if loaded_info else len(df_loaded)} resource"
+
+    # CKAN verisi zayıf → Demo + CKAN birleştir
+    st.info(
+        f"ℹ️ CKAN'dan {len(df_loaded)} satır geldi ama operasyonel veri zayıf "
+        f"(sadece {usable} koordinat, {has_cap} kapasite). Demo veri ile birleştirildi."
+    )
+    if "source_portal" not in df_loaded.columns or df_loaded["source_portal"].astype(str).eq("").all():
+        df_loaded["source_portal"] = "CKAN"
+    combined = pd.concat([demo_df, df_loaded], ignore_index=True)
+    combined = ensure_app_columns(combined)
+    return combined, candidate_df, loaded_info, "Hibrit (Demo + CKAN)", f"Demo + {len(loaded_info) if loaded_info else len(df_loaded)} CKAN resource"
+
 
 # =========================================================
 # RENDER BLOCKS
@@ -402,7 +402,9 @@ def render_map(df: pd.DataFrame):
             st.write(f"Geçerli koordinatlı: {int(as_bool_series(df['coordinate_valid']).sum())}")
             st.write(f"İsim alanı dolu: {int(as_bool_series(df['name_available']).sum())}")
             if not df.empty:
-                st.dataframe(df[["name", "city", "district", "lat", "lon"]].head(10))
+                cols_to_show = [c for c in ["name", "city", "district", "lat", "lon"] if c in df.columns]
+                if cols_to_show:
+                    st.dataframe(df[cols_to_show].head(10), width="stretch")
         return
 
     try:
@@ -460,7 +462,7 @@ def render_dashboard_tabs(df, district_summary, history_df):
         else:
             try:
                 fig = chart_risk_score(risk_df)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             except Exception as e:
                 st.warning(f"Grafik hatası: {e}")
 
@@ -471,26 +473,26 @@ def render_dashboard_tabs(df, district_summary, history_df):
         else:
             try:
                 fig = chart_occupancy_rate(occ_df)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             except Exception as e:
                 st.warning(f"Grafik hatası: {e}")
 
     with tabs[2]:
-        if district_summary.empty:
+        if district_summary is None or district_summary.empty:
             st.info("İlçe özeti hesaplanamadı.")
         else:
-            st.dataframe(district_summary, use_container_width=True)
+            st.dataframe(district_summary, width="stretch")
             try:
                 fig = chart_district_avg_risk(district_summary)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             except Exception:
                 pass
 
     with tabs[3]:
-        if history_df.empty:
+        if history_df is None or history_df.empty:
             st.info("Tarihsel snapshot bulunamadı.")
         else:
-            st.dataframe(history_df.tail(20), use_container_width=True)
+            st.dataframe(history_df.tail(20), width="stretch")
 
     with tabs[4]:
         st.download_button(
@@ -499,7 +501,7 @@ def render_dashboard_tabs(df, district_summary, history_df):
             file_name="smartshelter_filtered.csv",
             mime="text/csv",
         )
-        if not district_summary.empty:
+        if district_summary is not None and not district_summary.empty:
             st.download_button(
                 "⬇️ İlçe Özeti (CSV)",
                 data=district_summary.to_csv(index=False).encode("utf-8"),
@@ -543,13 +545,14 @@ def main():
         if removed > 0:
             st.sidebar.success(f"🔒 Strict: {removed} kayıt çıkarıldı.")
 
-    # Sidebar filtreleri
+    # ---- Sidebar filtreleri ----
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔎 Filtreler")
 
-    cities = sorted(df["city"].dropna().astype(str).unique().tolist())
-    districts = sorted(df["district"].dropna().astype(str).unique().tolist())
-    risk_levels = sorted(df["risk_level"].dropna().astype(str).unique().tolist())
+    # Filtre seçeneklerini df'den al
+    cities = sorted(df["city"].dropna().astype(str).unique().tolist()) if not df.empty else []
+    districts = sorted(df["district"].dropna().astype(str).unique().tolist()) if not df.empty else []
+    risk_levels = sorted(df["risk_level"].dropna().astype(str).unique().tolist()) if not df.empty else []
 
     use_city = st.sidebar.checkbox("İl filtresi kullan", value=False)
     selected_cities = (
@@ -561,30 +564,36 @@ def main():
         st.sidebar.multiselect("İlçe seç", districts, default=districts) if use_district else districts
     )
 
-    # Default olarak "Veri yetersiz" hariç tüm seviyeleri seç
-default_risks = [r for r in risk_levels if r != "Veri yetersiz"]
-if not default_risks:  # eğer hepsi "Veri yetersiz" ise hepsini göster
-    default_risks = risk_levels
+    # Risk seviyesi filtresi - akıllı default
+    if risk_levels:
+        default_risks = [r for r in risk_levels if r != "Veri yetersiz"]
+        if not default_risks:
+            default_risks = risk_levels
+    else:
+        default_risks = []
 
-selected_risks = st.sidebar.multiselect(
-    "Risk seviyesi", 
-    risk_levels, 
-    default=default_risks if default_risks else risk_levels
-)
+    selected_risks = st.sidebar.multiselect(
+        "Risk seviyesi",
+        risk_levels,
+        default=default_risks,
+    )
 
-# Eğer hiçbir risk seçilmediyse uyar ve tümünü göster
-if not selected_risks:
-    st.sidebar.info("ℹ️ Risk filtresi boş — tüm kayıtlar gösteriliyor.")
-    selected_risks = risk_levels
-    
-    # Filtre uygula
-    filtered = df[
-        df["city"].astype(str).isin(selected_cities)
-        & df["district"].astype(str).isin(selected_districts)
-        & df["risk_level"].astype(str).isin(selected_risks)
-    ].copy()
+    # Hiç risk seçilmediyse uyar ve tümünü kullan
+    if not selected_risks and risk_levels:
+        st.sidebar.info("ℹ️ Risk filtresi boş — tüm seviyeler gösteriliyor.")
+        selected_risks = risk_levels
 
-    # Render bölümleri
+    # ---- Filtre uygula ----
+    if df.empty:
+        filtered = df.copy()
+    else:
+        filtered = df[
+            df["city"].astype(str).isin(selected_cities)
+            & df["district"].astype(str).isin(selected_districts)
+            & df["risk_level"].astype(str).isin(selected_risks)
+        ].copy()
+
+    # ---- Render ----
     render_kpis(filtered)
     st.divider()
 
@@ -608,7 +617,7 @@ if not selected_risks:
 
     # Ham veri
     with st.expander("🧾 Ham Veri", expanded=False):
-        st.dataframe(filtered, use_container_width=True)
+        st.dataframe(filtered, width="stretch")
 
 
 if __name__ == "__main__":
